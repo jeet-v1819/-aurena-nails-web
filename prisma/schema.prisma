@@ -1,0 +1,306 @@
+// Prisma schema — Multi-Vendor E-Commerce Platform
+//
+// Provider notes
+// --------------
+// This file is the LOCAL DEVELOPMENT schema and targets SQLite so that
+//   npx prisma generate && npx prisma db push && node prisma/seed.js
+// works with zero external services.
+//
+// For production (PostgreSQL / Neon) a derived schema is generated from this
+// file by `prisma/build-postgres-schema.js` (see `npm run schema:pg`). The
+// models below are deliberately kept on the SQLite/PostgreSQL lowest common
+// denominator so the SAME models run on both engines:
+//   * no native enums   -> String columns + constants in src/lib/constants.js
+//   * no native Json    -> String columns holding JSON (parsed in src/utils)
+//   * Float for money   -> works identically on both engines
+//
+// Prisma 7 uses the `prisma-client` generator (no Rust query engine) and
+// requires a driver adapter at runtime — see src/lib/prisma.js.
+
+// `prisma-client-js` is used deliberately instead of Prisma 7's newer
+// `prisma-client` generator: the new generator emits **TypeScript** source only
+// (its `generatedFileExtension` option merely renames the .ts output, it does
+// not transpile it), which would force `typescript` + a tsconfig back into this
+// JavaScript-only project and would break `node prisma/seed.js` on Node 20.
+// `prisma-client-js` is still fully supported on Prisma 7.10 and emits real
+// CommonJS JavaScript that both Next.js and plain Node can consume.
+//
+// No custom `output` is set on purpose: Prisma then generates into
+// node_modules/@prisma/client (the classic location), so no `.d.ts` files land
+// inside src/ and Next.js never tries to turn this project into a TypeScript one.
+// Import with:  import { PrismaClient } from "@prisma/client";
+generator client {
+  provider = "prisma-client-js"
+}
+
+// NOTE (Prisma 7): the datasource `url` is no longer allowed inside the schema
+// file. The CLI reads it from prisma.config.js, and the runtime client gets a
+// driver adapter from src/lib/prisma.js.
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// Users & roles
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String?
+  name      String?
+  /// ADMIN | SELLER | CUSTOMER
+  role      String   @default("CUSTOMER")
+  /// false = disabled / deactivated account
+  status    Boolean  @default(true)
+  phone     String?
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products     Product[]
+  orders       Order[]      @relation("UserOrders")
+  sellerOrders Order[]      @relation("SellerOrders")
+  cart         Cart?
+  wishlist     Wishlist?
+  reviews      Review[]
+  addresses    Address[]
+  orderEvents  OrderEvent[]
+
+  @@index([role])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Address {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// SHIPPING | BILLING
+  type      String   @default("SHIPPING")
+  label     String?
+  fullName  String
+  phone     String?
+  line1     String
+  line2     String?
+  city      String
+  state     String
+  postalCode String
+  country   String   @default("India")
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  description String?
+  image       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  products Product[]
+}
+
+model Brand {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  description String?
+  image       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  products Product[]
+}
+
+model Product {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  description    String?
+  price          Float
+  /// percentage discount, 0-100
+  discount       Float    @default(0)
+  discountPrice  Float?
+  sku            String?  @unique
+  stock          Int      @default(0)
+  /// JSON array of image URLs, stored as a String for SQLite compatibility
+  images         String   @default("[]")
+  /// JSON array of sizes
+  size           String   @default("[]")
+  /// JSON array of colours
+  color          String   @default("[]")
+  /// ACTIVE | INACTIVE | OUT_OF_STOCK
+  status         String   @default("ACTIVE")
+  averageRating  Float    @default(0)
+  reviewCount    Int      @default(0)
+  views          Int      @default(0)
+  /// JSON object of extra specs
+  specifications String   @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  sellerId   String
+  seller     User      @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brandId    String?
+  brand      Brand?    @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  orderItems    OrderItem[]
+  cartItems     CartItem[]
+  wishlistItems WishlistItem[]
+  reviews       Review[]
+
+  @@index([sellerId])
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([status])
+  @@index([price])
+  @@index([createdAt])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  /// 1-5, validated in the API layer (SQLite has no CHECK via Prisma)
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([productId])
+}
+
+// ---------------------------------------------------------------------------
+// Cart & wishlist
+// ---------------------------------------------------------------------------
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id        String  @id @default(cuid())
+  cartId    String
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Int     @default(1)
+
+  @@unique([cartId, productId])
+  @@index([productId])
+}
+
+model Wishlist {
+  id        String         @id @default(cuid())
+  userId    String         @unique
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     WishlistItem[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model WishlistItem {
+  id         String   @id @default(cuid())
+  wishlistId String
+  wishlist   Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([wishlistId, productId])
+  @@index([productId])
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+model Order {
+  id            String    @id @default(cuid())
+  orderNumber   String    @unique
+  /// PENDING | CONFIRMED | PROCESSING | SHIPPED | DELIVERED | CANCELLED | REFUNDED
+  status        String    @default("PENDING")
+  /// PENDING | PAID | FAILED | REFUNDED
+  paymentStatus String    @default("PENDING")
+  /// MOCK | COD | CARD | UPI
+  paymentMethod String    @default("MOCK")
+  subtotal      Float
+  discount      Float     @default(0)
+  shipping      Float     @default(0)
+  tax           Float     @default(0)
+  total         Float
+  /// free-form snapshot of the shipping address used at checkout
+  shippingAddress String  @default("")
+  trackingNumber  String?
+  notes           String?
+  orderDate     DateTime  @default(now())
+  cancelledAt   DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  userId            String
+  user              User     @relation("UserOrders", fields: [userId], references: [id], onDelete: Cascade)
+  sellerId          String
+  seller            User     @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
+  shippingAddressId String?
+  shippingAddressRef Address? @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull)
+
+  items  OrderItem[]
+  events OrderEvent[]
+
+  @@index([userId])
+  @@index([sellerId])
+  @@index([status])
+  @@index([orderDate])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Int
+  /// unit price captured at purchase time
+  price     Float
+  total     Float
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+/// Append-only timeline powering customer "order tracking"
+model OrderEvent {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    String
+  note      String?
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
