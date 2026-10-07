@@ -1,0 +1,58 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files — keep the documented template, ignore real secrets
+.env
+.env.*
+!.env.example
+
+# netlify
+.netlify
+*.toml.bak
+
+# vercel
+.vercel
+
+# typescript build artifacts (project is JavaScript-only)
+*.tsbuildinfo
+next-env.d.ts
+
+# generated Prisma client lives in node_modules/@prisma/client and is rebuilt
+# by `npm install` (postinstall) / `npx prisma generate`
+
+# SQLite database files (local development only)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+prisma/dev.db
+prisma/postgres/schema.prisma

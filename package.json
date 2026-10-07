@@ -1,0 +1,45 @@
+{
+  "name": "ecommerce-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-vendor e-commerce platform (Admin / Seller / Customer) built with Next.js 16, React 19, Prisma 7 and Tailwind CSS 4.",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "schema:pg": "node prisma/build-postgres-schema.js",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:push:pg": "npm run schema:pg && prisma db push --schema prisma/postgres/schema.prisma",
+    "db:pull": "prisma db pull",
+    "db:studio": "prisma studio",
+    "db:seed": "node prisma/seed.js",
+    "db:setup": "prisma generate && prisma db push && node prisma/seed.js",
+    "db:reset": "prisma db push --force-reset && node prisma/seed.js"
+  },
+  "dependencies": {
+    "@prisma/adapter-libsql": "7.10.0",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "bcryptjs": "^2.4.3",
+    "next": "16.3.4",
+    "next-auth": "^4.24.15",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "optionalDependencies": {
+    "@prisma/adapter-better-sqlite3": "7.10.0"
+  },
+  "devDependencies": {
+    "@netlify/plugin-nextjs": "^5.16.2",
+    "@tailwindcss/postcss": "^4",
+    "eslint": "^9",
+    "prisma": "7.10.0",
+    "tailwindcss": "^4"
+  }
+}
