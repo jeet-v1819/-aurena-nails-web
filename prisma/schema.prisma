@@ -1,306 +1,568 @@
-// Prisma schema — Multi-Vendor E-Commerce Platform
+// ---------------------------------------------------------------------------
+// Aurena Nails — Prisma schema
+// ---------------------------------------------------------------------------
+// Database : Neon PostgreSQL (serverless Postgres)
+// ORM      : Prisma 7
 //
-// Provider notes
-// --------------
-// This file is the LOCAL DEVELOPMENT schema and targets SQLite so that
-//   npx prisma generate && npx prisma db push && node prisma/seed.js
-// works with zero external services.
+// Neon setup
+//   1. Create a project at https://console.neon.tech
+//   2. Copy the pooled connection string (`...-pooler...?sslmode=require`)
+//   3. Put it in `.env` as DATABASE_URL="postgresql://..."
+//   4. npm run db:deploy && npm run db:seed
 //
-// For production (PostgreSQL / Neon) a derived schema is generated from this
-// file by `prisma/build-postgres-schema.js` (see `npm run schema:pg`). The
-// models below are deliberately kept on the SQLite/PostgreSQL lowest common
-// denominator so the SAME models run on both engines:
-//   * no native enums   -> String columns + constants in src/lib/constants.js
-//   * no native Json    -> String columns holding JSON (parsed in src/utils)
-//   * Float for money   -> works identically on both engines
-//
-// Prisma 7 uses the `prisma-client` generator (no Rust query engine) and
-// requires a driver adapter at runtime — see src/lib/prisma.js.
+// NOTE (Prisma 7): connection URLs are no longer allowed inside
+// `datasource` blocks. The CLI reads it from `prisma.config.ts` and the runtime
+// Prisma Client receives it through the `@prisma/adapter-pg` driver adapter in
+// `src/lib/db/prisma.ts` — both read the SAME `DATABASE_URL` environment
+// variable, exactly as required.
+// ---------------------------------------------------------------------------
 
-// `prisma-client-js` is used deliberately instead of Prisma 7's newer
-// `prisma-client` generator: the new generator emits **TypeScript** source only
-// (its `generatedFileExtension` option merely renames the .ts output, it does
-// not transpile it), which would force `typescript` + a tsconfig back into this
-// JavaScript-only project and would break `node prisma/seed.js` on Node 20.
-// `prisma-client-js` is still fully supported on Prisma 7.10 and emits real
-// CommonJS JavaScript that both Next.js and plain Node can consume.
-//
-// No custom `output` is set on purpose: Prisma then generates into
-// node_modules/@prisma/client (the classic location), so no `.d.ts` files land
-// inside src/ and Next.js never tries to turn this project into a TypeScript one.
-// Import with:  import { PrismaClient } from "@prisma/client";
 generator client {
   provider = "prisma-client-js"
 }
 
-// NOTE (Prisma 7): the datasource `url` is no longer allowed inside the schema
-// file. The CLI reads it from prisma.config.js, and the runtime client gets a
-// driver adapter from src/lib/prisma.js.
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
 }
 
 // ---------------------------------------------------------------------------
-// Users & roles
+// Enums
 // ---------------------------------------------------------------------------
 
+/// Access level. Admins manage the studio; customers book appointments.
+enum Role {
+  ADMIN
+  CUSTOMER
+}
+
+/// A single `Category` table is shared by services, gallery images and videos.
+/// `type` discriminates which area a category belongs to (SERVICE | GALLERY |
+/// VIDEO), which keeps one CRUD screen in the admin panel instead of three
+/// identical tables.
+enum CategoryType {
+  SERVICE
+  GALLERY
+  VIDEO
+}
+
+/// Appointment lifecycle.
+///   PENDING   -> requested by the customer, waiting for the studio
+///   CONFIRMED -> accepted by the studio, the slot is reserved
+///   COMPLETED -> the visit happened (unlocks reviews)
+///   CANCELLED -> cancelled by the customer, the admin, or the studio
+///   REJECTED  -> the studio could not accept the request
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  REJECTED
+}
+
+/// Broad grouping used by the notification centre icons.
+enum NotificationType {
+  ACCOUNT
+  APPOINTMENT
+  REVIEW
+  MESSAGE
+  SYSTEM
+}
+
+// ---------------------------------------------------------------------------
+// Accounts
+// ---------------------------------------------------------------------------
+
+/// Studio customer OR admin. A customer can sign in with email *or* mobile.
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String?
-  name      String?
-  /// ADMIN | SELLER | CUSTOMER
-  role      String   @default("CUSTOMER")
-  /// false = disabled / deactivated account
-  status    Boolean  @default(true)
-  phone     String?
-  address   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String    @id @default(cuid())
+  firstName    String
+  lastName     String
+  email        String    @unique
+  /// Required for customers. Stored normalised to E.164 (+91XXXXXXXXXX).
+  mobile       String    @unique
+  passwordHash String
+  /// Cloudinary URL + public id of the profile picture (optional).
+  avatarUrl      String?
+  avatarPublicId String?
+  role         Role      @default(CUSTOMER)
+  /// false = deactivated. Deactivated customers cannot sign in.
+  isActive     Boolean   @default(true)
+  deactivatedAt DateTime?
+  lastLoginAt   DateTime?
+  /// Soft delete: the row is kept so appointment history stays intact.
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
-  products     Product[]
-  orders       Order[]      @relation("UserOrders")
-  sellerOrders Order[]      @relation("SellerOrders")
-  cart         Cart?
-  wishlist     Wishlist?
-  reviews      Review[]
-  addresses    Address[]
-  orderEvents  OrderEvent[]
+  appointments         Appointment[]         @relation("CustomerAppointments")
+  appointmentsHandled  Appointment[]         @relation("AppointmentHandledBy")
+  appointmentEvents    AppointmentEvent[]
+  reviews              Review[]
+  wishlist             Wishlist?
+  notifications        Notification[]
+  passwordResetTokens  PasswordResetToken[]
+  contactMessages      ContactMessage[]
+  galleryImages        GalleryImage[]
+  auditLogs            AuditLog[]
 
-  @@index([role])
-  @@index([status])
+  @@index([role, isActive])
+  @@index([isActive, deletedAt])
   @@index([createdAt])
+  @@index([lastLoginAt])
 }
 
-model Address {
-  id        String   @id @default(cuid())
+/// Single-use password reset token. Only the SHA-256 hash of the token is
+/// stored, so a database leak cannot be turned into an account takeover.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  /// SHIPPING | BILLING
-  type      String   @default("SHIPPING")
-  label     String?
-  fullName  String
-  phone     String?
-  line1     String
-  line2     String?
-  city      String
-  state     String
-  postalCode String
-  country   String   @default("India")
-  isDefault Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  orders Order[]
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
   @@index([userId])
+  @@index([expiresAt])
 }
 
 // ---------------------------------------------------------------------------
-// Catalogue
+// Catalogue of services, gallery and videos
 // ---------------------------------------------------------------------------
 
+/// Categories for services, gallery images and videos (see `CategoryType`).
 model Category {
-  id          String    @id @default(cuid())
+  id          String       @id @default(cuid())
   name        String
-  slug        String    @unique
+  slug        String
+  type        CategoryType @default(SERVICE)
   description String?
-  image       String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  imageUrl    String?
+  imagePublicId String?
+  isActive    Boolean      @default(true)
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
-  products Product[]
+  services      Service[]
+  galleryImages GalleryImage[]
+  videos        Video[]
+
+  @@unique([type, slug])
+  @@index([type, isActive])
+  @@index([sortOrder])
 }
 
-model Brand {
-  id          String    @id @default(cuid())
-  name        String
-  slug        String    @unique
-  description String?
-  image       String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+/// A nail service offered by the studio (Gel Nails, Bridal Nails, …).
+/// Prices are informational — Aurena Nails does not sell online.
+model Service {
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique
+  shortDescription String
+  description      String
+  categoryId    String
+  category      Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
-  products Product[]
-}
+  /// Appointment length in minutes (drives the booking slot calculation).
+  durationMinutes Int
+  /// Informational pricing shown on the website.
+  startingPrice Decimal? @db.Decimal(10, 2)
+  regularPrice  Decimal? @db.Decimal(10, 2)
+  promoPrice    Decimal? @db.Decimal(10, 2)
+  currency      String   @default("INR")
 
-model Product {
-  id             String   @id @default(cuid())
-  name           String
-  slug           String   @unique
-  description    String?
-  price          Float
-  /// percentage discount, 0-100
-  discount       Float    @default(0)
-  discountPrice  Float?
-  sku            String?  @unique
-  stock          Int      @default(0)
-  /// JSON array of image URLs, stored as a String for SQLite compatibility
-  images         String   @default("[]")
-  /// JSON array of sizes
-  size           String   @default("[]")
-  /// JSON array of colours
-  color          String   @default("[]")
-  /// ACTIVE | INACTIVE | OUT_OF_STOCK
-  status         String   @default("ACTIVE")
-  averageRating  Float    @default(0)
-  reviewCount    Int      @default(0)
-  views          Int      @default(0)
-  /// JSON object of extra specs
-  specifications String   @default("{}")
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  /// Facets used by the services filters.
+  nailType String?
+  style    String?
+  occasion String?
+  difficulty String?
 
-  sellerId   String
-  seller     User      @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  categoryId String?
-  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  brandId    String?
-  brand      Brand?    @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  preparationInstructions String?
+  afterCareInstructions   String?
 
-  orderItems    OrderItem[]
-  cartItems     CartItem[]
+  isActive    Boolean @default(true)
+  isFeatured  Boolean @default(false)
+  /// false = temporarily unavailable (shown greyed out, not bookable).
+  isAvailable Boolean @default(true)
+  sortOrder   Int     @default(0)
+  /// Cached rating aggregates, recalculated whenever a review changes.
+  ratingAverage Decimal @default(0) @db.Decimal(3, 2)
+  ratingCount   Int     @default(0)
+  viewCount     Int     @default(0)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  images       ServiceImage[]
+  videos       ServiceVideo[]
+  appointments Appointment[]
+  reviews      Review[]
   wishlistItems WishlistItem[]
-  reviews       Review[]
 
-  @@index([sellerId])
   @@index([categoryId])
-  @@index([brandId])
-  @@index([status])
-  @@index([price])
-  @@index([createdAt])
+  @@index([isActive, isFeatured])
+  @@index([isActive, sortOrder])
+  @@index([startingPrice])
+  @@index([deletedAt])
 }
 
-model Review {
-  id        String   @id @default(cuid())
-  /// 1-5, validated in the API layer (SQLite has no CHECK via Prisma)
-  rating    Int
-  comment   String?
+/// Extra image for a service (main image = the primary one / lowest sortOrder).
+model ServiceImage {
+  id          String  @id @default(cuid())
+  serviceId   String
+  service     Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  /// Cloudinary secure URL (or /uploads/... in local storage mode).
+  url         String
+  publicId    String?
+  alt         String?
+  fileType    String?
+  fileSize    Int?
+  width       Int?
+  height      Int?
+  isPrimary   Boolean @default(false)
+  sortOrder   Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([serviceId, sortOrder])
+}
+
+/// Promotional video attached to a service.
+model ServiceVideo {
+  id          String  @id @default(cuid())
+  serviceId   String
+  service     Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  title       String
+  url         String
+  publicId    String?
+  thumbnailUrl String?
+  thumbnailPublicId String?
+  durationSeconds Int?
+  width       Int?
+  height      Int?
+  fileSize    Int?
+  format      String?
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([serviceId, sortOrder])
+}
+
+/// Nail-art photo in the gallery.
+model GalleryImage {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  url      String
+  publicId String?
+  alt      String?
+  width    Int?
+  height   Int?
+  fileSize Int?
+  format   String?
+
+  /// Searchable / filterable tags (Postgres text array).
+  tags     String[] @default([])
+  style     String?
+  occasion  String?
+  /// The date the design was created / photographed.
+  designDate DateTime? @db.Date
+
+  isFeatured Boolean @default(false)
+  isActive   Boolean @default(true)
+  sortOrder  Int     @default(0)
+  uploadedById String?
+  uploadedBy   User?   @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  deletedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  userId    String
-  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  productId String
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  wishlistItems WishlistItem[]
 
-  @@unique([userId, productId])
-  @@index([productId])
+  @@index([categoryId, isActive])
+  @@index([isActive, isFeatured])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+/// Nail-art video in the video gallery.
+model Video {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  url               String
+  publicId          String?
+  thumbnailUrl      String?
+  thumbnailPublicId String?
+  durationSeconds   Int?
+  width             Int?
+  height            Int?
+  fileSize          Int?
+  format            String?
+
+  tags     String[] @default([])
+  isFeatured Boolean @default(false)
+  isActive   Boolean @default(true)
+  viewCount  Int     @default(0)
+  publishedAt DateTime @default(now())
+
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([categoryId, isActive])
+  @@index([isActive, isFeatured])
+  @@index([publishedAt])
+  @@index([deletedAt])
 }
 
 // ---------------------------------------------------------------------------
-// Cart & wishlist
+// Appointments
 // ---------------------------------------------------------------------------
 
-model Cart {
-  id        String     @id @default(cuid())
-  userId    String     @unique
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  items     CartItem[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-}
-
-model CartItem {
-  id        String  @id @default(cuid())
-  cartId    String
-  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  productId String
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  quantity  Int     @default(1)
-
-  @@unique([cartId, productId])
-  @@index([productId])
-}
-
-model Wishlist {
-  id        String         @id @default(cuid())
-  userId    String         @unique
-  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  items     WishlistItem[]
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-}
-
-model WishlistItem {
-  id         String   @id @default(cuid())
-  wishlistId String
-  wishlist   Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
-  productId  String
-  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  createdAt  DateTime @default(now())
-
-  @@unique([wishlistId, productId])
-  @@index([productId])
-}
-
-// ---------------------------------------------------------------------------
-// Orders
-// ---------------------------------------------------------------------------
-
-model Order {
-  id            String    @id @default(cuid())
-  orderNumber   String    @unique
-  /// PENDING | CONFIRMED | PROCESSING | SHIPPED | DELIVERED | CANCELLED | REFUNDED
-  status        String    @default("PENDING")
-  /// PENDING | PAID | FAILED | REFUNDED
-  paymentStatus String    @default("PENDING")
-  /// MOCK | COD | CARD | UPI
-  paymentMethod String    @default("MOCK")
-  subtotal      Float
-  discount      Float     @default(0)
-  shipping      Float     @default(0)
-  tax           Float     @default(0)
-  total         Float
-  /// free-form snapshot of the shipping address used at checkout
-  shippingAddress String  @default("")
-  trackingNumber  String?
-  notes           String?
-  orderDate     DateTime  @default(now())
-  cancelledAt   DateTime?
-  updatedAt     DateTime  @updatedAt
-
-  userId            String
-  user              User     @relation("UserOrders", fields: [userId], references: [id], onDelete: Cascade)
-  sellerId          String
-  seller            User     @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
-  shippingAddressId String?
-  shippingAddressRef Address? @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull)
-
-  items  OrderItem[]
-  events OrderEvent[]
-
-  @@index([userId])
-  @@index([sellerId])
-  @@index([status])
-  @@index([orderDate])
-}
-
-model OrderItem {
-  id        String  @id @default(cuid())
-  orderId   String
-  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productId String
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  quantity  Int
-  /// unit price captured at purchase time
-  price     Float
-  total     Float
-
-  @@index([orderId])
-  @@index([productId])
-}
-
-/// Append-only timeline powering customer "order tracking"
-model OrderEvent {
+/// A booked visit. The slot is stored as date + minutes-from-midnight so
+/// availability maths never depends on the server timezone.
+model Appointment {
   id        String   @id @default(cuid())
-  orderId   String
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  status    String
+  /// Human friendly booking code shown to the customer (e.g. AUR-7K2QF4).
+  reference String   @unique
+  userId    String
+  user      User     @relation("CustomerAppointments", fields: [userId], references: [id], onDelete: Cascade)
+  serviceId String
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  /// Calendar date of the visit.
+  date DateTime @db.Date
+  /// Minutes from midnight, studio local time (e.g. 600 = 10:00).
+  startMinutes Int
+  endMinutes   Int
+  /// Length actually reserved (service duration, snapshotted at booking time).
+  durationMinutes Int
+
+  status AppointmentStatus @default(PENDING)
+  customerNote String?
+  adminNote    String?
+  /// Informational price snapshot — no payment is taken online.
+  quotedPrice  Decimal? @db.Decimal(10, 2)
+
+  cancelledAt    DateTime?
+  cancelledById  String?
+  statusChangedAt DateTime @default(now())
+  handledById    String?
+  handledBy      User?    @relation("AppointmentHandledBy", fields: [handledById], references: [id], onDelete: SetNull)
+  completedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events  AppointmentEvent[]
+  reviews Review[]
+
+  @@index([userId, date])
+  @@index([serviceId, date])
+  @@index([date, status])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Audit trail of every appointment status change.
+model AppointmentEvent {
+  id            String   @id @default(cuid())
+  appointmentId String
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  status        AppointmentStatus
+  note          String?
+  actorId       String?
+  actor         User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+
+  @@index([appointmentId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Wishlist (saved favourites — no cart, no checkout)
+// ---------------------------------------------------------------------------
+
+/// One wishlist per customer. Items point at a service or a gallery design.
+model Wishlist {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items WishlistItem[]
+}
+
+/// A single saved favourite. Exactly one of `serviceId` / `galleryImageId`
+/// is set (validated in the service layer).
+model WishlistItem {
+  id             String         @id @default(cuid())
+  wishlistId     String
+  wishlist       Wishlist       @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  serviceId      String?
+  service        Service?       @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  galleryImageId String?
+  galleryImage   GalleryImage?  @relation(fields: [galleryImageId], references: [id], onDelete: Cascade)
+  createdAt      DateTime       @default(now())
+
+  @@unique([wishlistId, serviceId])
+  @@unique([wishlistId, galleryImageId])
+  @@index([wishlistId])
+}
+
+// ---------------------------------------------------------------------------
+// Reviews
+// ---------------------------------------------------------------------------
+
+/// Customer review of a service. Only allowed after a COMPLETED appointment.
+model Review {
+  id            String      @id @default(cuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  serviceId     String
+  service       Service     @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  appointmentId String?
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  rating  Int     @db.SmallInt
+  comment String?
+  /// false = hidden by an admin (kept for the audit trail, not shown publicly).
+  isVisible Boolean @default(true)
+  hiddenAt  DateTime?
+  /// Admin moderation note (never overwrites the customer's words silently).
+  adminNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, serviceId])
+  @@index([serviceId, isVisible])
+  @@index([rating])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Communication
+// ---------------------------------------------------------------------------
+
+/// Message submitted through the public contact form.
+model ContactMessage {
+  id      String  @id @default(cuid())
+  name    String
+  email   String
+  mobile  String
+  subject String
+  message String
+
+  isRead   Boolean   @default(false)
+  readAt   DateTime?
+  /// Set when a signed-in customer sends the message.
+  userId   String?
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([isRead, createdAt])
+  @@index([createdAt])
+}
+
+/// In-app notification for a customer (appointment updates, review replies, …).
+model Notification {
+  id      String           @id @default(cuid())
+  userId  String
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type    NotificationType @default(SYSTEM)
+  title   String
+  message String
+  /// Relative deep link, e.g. /appointments
+  link    String?
+  isRead  Boolean          @default(false)
+  readAt  DateTime?
+  createdAt DateTime       @default(now())
+
+  @@index([userId, isRead, createdAt])
+  @@index([userId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Website content & studio configuration
+// ---------------------------------------------------------------------------
+
+/// Key/value store for editable website copy, contact details, social links and
+/// appointment rules. Keys are grouped by `section` so the admin panel can render
+/// one form per area. Defaults live in `src/lib/content/defaults.ts`.
+model WebsiteContent {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   @db.Text
+  section   String   @default("general")
+  label     String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@index([section])
+}
+
+/// Opening hours. `dayOfWeek`: 0 = Sunday … 6 = Saturday.
+model BusinessHours {
+  id        String @id @default(cuid())
+  dayOfWeek Int    @unique
+  isOpen    Boolean @default(true)
+  /// Minutes from midnight, studio local time.
+  openMinutes  Int @default(600)  // 10:00
+  closeMinutes Int @default(1140) // 19:00
+  /// Optional lunch/break window — slots inside it are not offered.
+  breakStartMinutes Int?
+  breakEndMinutes   Int?
+  /// Overrides the studio-wide slot interval for this day.
+  slotIntervalMinutes Int?
   note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Special closed dates (festivals, holidays). Bookings are blocked on these.
+model Holiday {
+  id          String   @id @default(cuid())
+  name        String
+  date        DateTime @db.Date @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([date, isActive])
+}
+
+/// Admin action trail. Used e.g. to record moderating a customer review, which
+/// must never silently rewrite customer-authored content.
+model AuditLog {
+  id        String   @id @default(cuid())
   actorId   String?
   actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  entity    String
+  entityId  String?
+  /// JSON string with the fields that changed (before/after).
+  changes   String?  @db.Text
+  ipAddress String?
   createdAt DateTime @default(now())
 
-  @@index([orderId])
+  @@index([entity, entityId])
+  @@index([actorId, createdAt])
+  @@index([createdAt])
 }
