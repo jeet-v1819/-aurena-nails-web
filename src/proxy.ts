@@ -9,8 +9,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { jwtVerify } from "jose";
-
-const SESSION_COOKIE = "aurena_session";
+import { isValidAuthSecret, SESSION_COOKIE } from "@/lib/auth/config";
 
 /** Pages only a signed-in customer (or admin) may open. */
 const CUSTOMER_PREFIXES = ["/profile", "/appointments", "/wishlist", "/notifications"];
@@ -24,7 +23,7 @@ type TokenPayload = { sub?: string; role?: "ADMIN" | "CUSTOMER" };
 
 function secretKey(): Uint8Array | null {
   const secret = process.env.AUTH_SECRET;
-  if (!secret || secret.length < 16) return null;
+  if (!isValidAuthSecret(secret)) return null;
   return new TextEncoder().encode(secret);
 }
 
@@ -69,7 +68,13 @@ export async function proxy(request: NextRequest) {
 
   // 3. Signed-in visitors do not need the sign-in screens (unless they just
   //    signed out or completed a reset, in which case the params matter).
-  if (matches(pathname, AUTH_PAGES) && session && !request.nextUrl.searchParams.has("loggedOut") && !request.nextUrl.searchParams.has("reset")) {
+  if (
+    matches(pathname, AUTH_PAGES) &&
+    session &&
+    !request.nextUrl.searchParams.has("loggedOut") &&
+    !request.nextUrl.searchParams.has("reset") &&
+    !request.nextUrl.searchParams.has("reauth")
+  ) {
     const target = session.role === "ADMIN" ? "/admin/dashboard" : "/profile";
     return NextResponse.redirect(new URL(target, request.url));
   }

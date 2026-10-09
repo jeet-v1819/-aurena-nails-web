@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
     }
 
     const service = await prisma.service.findFirst({
-      where: { id: serviceId, deletedAt: null, isActive: true },
+      where: { id: serviceId, deletedAt: null, isActive: true, category: { type: "SERVICE" } },
       select: { id: true, name: true, durationMinutes: true, isAvailable: true },
     });
 

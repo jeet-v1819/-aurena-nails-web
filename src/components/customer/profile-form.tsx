@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { ImageUp, KeyRound, Loader2, Save, Trash2 } from "lucide-react";
 import { changePasswordAction, updateProfileAction } from "@/server/actions/customer";
@@ -60,7 +60,9 @@ export function ProfileForm({
     defaultValues: { currentPassword: "", password: "", confirmPassword: "" },
   });
 
-  const newPassword = passwordForm.watch("password") ?? "";
+  const newPassword = useWatch({ control: passwordForm.control, name: "password" }) ?? "";
+  const firstName = useWatch({ control: profileForm.control, name: "firstName" }) ?? "";
+  const lastName = useWatch({ control: profileForm.control, name: "lastName" }) ?? "";
 
   const saveProfile = profileForm.handleSubmit(async (values) => {
     setProfileError(null);
@@ -100,6 +102,8 @@ export function ProfileForm({
     notifyResult(result);
     setPasswordDone(true);
     passwordForm.reset({ currentPassword: "", password: "", confirmPassword: "" });
+    router.replace(result.data?.redirectTo ?? "/login?passwordChanged=1");
+    router.refresh();
   });
 
   const onUploaded = (files: UploadedFile[]) => {
@@ -126,7 +130,7 @@ export function ProfileForm({
               {avatar ? (
                 <Image src={avatar.url} alt="Your profile picture" fill sizes="80px" className="object-cover" />
               ) : (
-                initials(profileForm.watch("firstName") ?? "", profileForm.watch("lastName") ?? "")
+                initials(firstName, lastName)
               )}
             </span>
 

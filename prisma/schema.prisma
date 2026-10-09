@@ -81,6 +81,8 @@ model User {
   /// Required for customers. Stored normalised to E.164 (+91XXXXXXXXXX).
   mobile       String    @unique
   passwordHash String
+  /// Incremented on password changes and account deactivation to revoke old JWTs.
+  sessionVersion Int @default(0)
   /// Cloudinary URL + public id of the profile picture (optional).
   avatarUrl      String?
   avatarPublicId String?

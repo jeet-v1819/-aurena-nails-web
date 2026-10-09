@@ -7,18 +7,20 @@
  */
 import "server-only";
 import { cache } from "react";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { CONTENT_DEFAULTS, CONTENT_FIELDS, type SiteContent } from "@/lib/content/defaults";
 import {
+  DEFAULT_BUFFER_MINUTES,
   DEFAULT_CANCELLATION_WINDOW_HOURS,
   DEFAULT_MAX_ADVANCE_DAYS,
   DEFAULT_MIN_LEAD_MINUTES,
   DEFAULT_SLOT_INTERVAL_MINUTES,
 } from "@/lib/constants";
 
-const number = (value: string | undefined, fallback: number) => {
+const number = (value: string | undefined, fallback: number, allowZero = false) => {
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isFinite(parsed) && (parsed > 0 || (allowZero && parsed === 0)) ? parsed : fallback;
 };
 
 /** Merges stored values over the code defaults and exposes typed accessors. */
@@ -84,20 +86,21 @@ function resolve(stored: Record<string, string>): SiteContent {
     bookingNote: values["booking.note"],
     bookingConfirmationNote: values["booking.confirmationNote"],
     slotIntervalMinutes: number(values["booking.slotIntervalMinutes"], DEFAULT_SLOT_INTERVAL_MINUTES),
-    minLeadMinutes: number(values["booking.minLeadMinutes"], DEFAULT_MIN_LEAD_MINUTES),
+    minLeadMinutes: number(values["booking.minLeadMinutes"], DEFAULT_MIN_LEAD_MINUTES, true),
     maxAdvanceDays: number(values["booking.maxAdvanceDays"], DEFAULT_MAX_ADVANCE_DAYS),
     cancellationWindowHours: number(
-      values["booking.cancellationWindowHours"] === "0" ? "0" : values["booking.cancellationWindowHours"],
-      DEFAULT_CANCELLATION_WINDOW_HOURS
+      values["booking.cancellationWindowHours"],
+      DEFAULT_CANCELLATION_WINDOW_HOURS,
+      true
     ),
-    bufferMinutes: number(values["booking.bufferMinutes"] === "0" ? "0" : values["booking.bufferMinutes"], 15),
+    bufferMinutes: number(values["booking.bufferMinutes"], DEFAULT_BUFFER_MINUTES, true),
   };
 }
 
 /** Resolved content for the current request (deduplicated by React `cache`). */
-export const getSiteContent = cache(async (): Promise<SiteContent> => {
+export const getSiteContent = cache(async (db: Prisma.TransactionClient = prisma): Promise<SiteContent> => {
   try {
-    const rows = await prisma.websiteContent.findMany({ select: { key: true, value: true } });
+    const rows = await db.websiteContent.findMany({ select: { key: true, value: true } });
     return resolve(Object.fromEntries(rows.map((row) => [row.key, row.value])));
   } catch (error) {
     // A missing table (fresh clone before migrations) must not take the site down.
@@ -135,8 +138,8 @@ export async function updateContent(values: Record<string, string>) {
 }
 
 /** Booking rules, read straight from content so both agree by construction. */
-export async function getBookingSettings() {
-  const content = await getSiteContent();
+export const getBookingSettings = cache(async (db: Prisma.TransactionClient = prisma) => {
+  const content = await getSiteContent(db);
   return {
     slotIntervalMinutes: content.slotIntervalMinutes,
     minLeadMinutes: content.minLeadMinutes,
@@ -144,4 +147,4 @@ export async function getBookingSettings() {
     cancellationWindowHours: content.cancellationWindowHours,
     bufferMinutes: content.bufferMinutes,
   };
-}
+});

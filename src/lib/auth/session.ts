@@ -18,8 +18,9 @@ import { redirect } from "next/navigation";
 import { SignJWT, jwtVerify } from "jose";
 import type { Role } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+import { isValidAuthSecret, SESSION_COOKIE } from "@/lib/auth/config";
 
-export const SESSION_COOKIE = "aurena_session";
+export { SESSION_COOKIE } from "@/lib/auth/config";
 const SESSION_DAYS = 30;
 const SESSION_DAYS_SHORT = 1;
 
@@ -37,9 +38,9 @@ export type SessionUser = {
 
 function secretKey(): Uint8Array {
   const secret = process.env.AUTH_SECRET;
-  if (!secret || secret.length < 16) {
+  if (!isValidAuthSecret(secret)) {
     throw new Error(
-      "AUTH_SECRET is missing or too short. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\""
+      "AUTH_SECRET must be a random secret containing at least 32 bytes. Do not use a URL, DATABASE_URL, database password, or Cloudinary secret. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\""
     );
   }
   return new TextEncoder().encode(secret);
@@ -53,9 +54,9 @@ function secretKey(): Uint8Array {
  * protected action and route handler re-reads the user from PostgreSQL through
  * `requireUser()` / `requireAdmin()`, so a stale role can never grant access.
  */
-export async function signSessionToken(userId: string, remember: boolean, role?: Role) {
+export async function signSessionToken(userId: string, remember: boolean, role?: Role, sessionVersion = 0) {
   const maxAge = (remember ? SESSION_DAYS : SESSION_DAYS_SHORT) * 24 * 60 * 60;
-  return new SignJWT(role ? { sub: userId, role } : { sub: userId })
+  return new SignJWT({ sub: userId, ...(role ? { role } : {}), sv: sessionVersion })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(`${maxAge}s`)
@@ -63,8 +64,8 @@ export async function signSessionToken(userId: string, remember: boolean, role?:
 }
 
 /** Writes the session cookie. `remember` = stay signed in for 30 days. */
-export async function createSession(userId: string, remember = true, role?: Role) {
-  const token = await signSessionToken(userId, remember, role);
+export async function createSession(userId: string, remember = true, role?: Role, sessionVersion = 0) {
+  const token = await signSessionToken(userId, remember, role, sessionVersion);
   const maxAge = (remember ? SESSION_DAYS : SESSION_DAYS_SHORT) * 24 * 60 * 60;
   const store = await cookies();
   store.set(SESSION_COOKIE, token, {
@@ -78,7 +79,13 @@ export async function createSession(userId: string, remember = true, role?: Role
 
 export async function destroySession() {
   const store = await cookies();
-  store.delete(SESSION_COOKIE);
+  store.set(SESSION_COOKIE, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 0,
+  });
 }
 
 /** Reads the signed cookie and loads the account. Returns null when anonymous. */
@@ -88,10 +95,12 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   if (!token) return null;
 
   let userId: string;
+  let tokenSessionVersion = 0;
   try {
     const { payload } = await jwtVerify(token, secretKey());
     if (!payload.sub) return null;
     userId = payload.sub;
+    tokenSessionVersion = typeof payload.sv === "number" && Number.isSafeInteger(payload.sv) ? payload.sv : 0;
   } catch {
     return null; // expired or tampered token
   }
@@ -107,12 +116,23 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
         mobile: true,
         role: true,
         isActive: true,
+        sessionVersion: true,
         avatarUrl: true,
       },
     });
-    if (!user || !user.isActive) return null;
+    if (!user || !user.isActive || user.sessionVersion !== tokenSessionVersion) return null;
 
-    return { ...user, fullName: `${user.firstName} ${user.lastName}`.trim() };
+    return {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      fullName: `${user.firstName} ${user.lastName}`.trim(),
+      mobile: user.mobile,
+      role: user.role,
+      isActive: user.isActive,
+      avatarUrl: user.avatarUrl,
+    };
   } catch {
     // Database unreachable — treat as signed out rather than crashing the page.
     return null;
@@ -123,7 +143,9 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 export async function requireUser(callbackUrl?: string): Promise<SessionUser> {
   const user = await getCurrentUser();
   if (!user) {
-    redirect(`/login${callbackUrl ? `?callbackUrl=${encodeURIComponent(callbackUrl)}` : ""}`);
+    const params = new URLSearchParams({ reauth: "1" });
+    if (callbackUrl) params.set("redirect", callbackUrl);
+    redirect(`/login?${params.toString()}`);
   }
   return user;
 }
@@ -131,7 +153,7 @@ export async function requireUser(callbackUrl?: string): Promise<SessionUser> {
 /** Throws a redirect to /admin/login when the visitor is not an active admin. */
 export async function requireAdmin(): Promise<SessionUser> {
   const user = await getCurrentUser();
-  if (!user) redirect("/admin/login?reason=auth");
+  if (!user) redirect("/admin/login?reason=auth&reauth=1");
   if (user.role !== "ADMIN") redirect("/forbidden?area=admin");
   return user;
 }

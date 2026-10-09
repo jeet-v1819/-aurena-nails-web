@@ -1,6 +1,6 @@
 # Aurena Nails — Luxury Nail Art & Beauty Studio
 
-A complete, production-ready website and studio-management system for **Aurena Nails**, a luxury nail-art
+A full-featured website and studio-management system for **Aurena Nails**, a luxury nail-art
 studio. Customers browse services, look through the gallery of nail designs, watch studio videos, book
 appointments in a five-step wizard, save designs to a wishlist, and leave reviews after a visit. The studio
 owner manages everything — services, gallery, videos, appointments, customers, reviews, messages, opening
@@ -61,10 +61,12 @@ hours, holidays and website copy — from a protected admin panel.
 - Slots come from the studio's real **business hours**, per weekday, with optional break windows.
 - **Holidays** and past dates are blocked; bookings beyond the maximum advance window are refused.
 - A **minimum lead time** and a **buffer** between appointments are enforced.
-- **Double booking is impossible**: a partial unique index in PostgreSQL
-  (`Appointment_active_slot_key`) makes two active appointments at the same date and time a database error,
-  and the UI reports it politely ("_That time slot was just taken…_"). Availability already subtracts
-  booked slots, so the disabled slot never appears in the first place.
+- Booking writes and reactivations take a PostgreSQL transaction-scoped lock per studio-local date, then
+  recheck availability (including the configurable buffer) before committing. A PostgreSQL GiST exclusion
+  constraint (`Appointment_active_no_overlap`) independently rejects overlapping active appointment ranges;
+  a partial unique index (`Appointment_active_slot_key`) also guards exact duplicate starts. The UI reports
+  conflicts politely ("_That time slot was just taken…_"). Availability subtracts existing bookings, so a
+  blocked slot normally never appears in the first place.
 - Statuses: `PENDING`, `CONFIRMED`, `COMPLETED`, `CANCELLED`, `REJECTED`, with a strict transition table.
 - Customers can cancel from their dashboard while the cancellation window is open.
 
@@ -85,7 +87,7 @@ be hidden or deleted, messages marked read, gallery images reordered with drag &
 
 Also included: skeleton loaders, toast notifications and confirmations on every destructive action, friendly
 error messages (never a stack trace), custom 404 / 401 / 403 / 500 pages, XML sitemap, `robots.txt`, semantic
-HTML, keyboard-accessible controls, responsive layouts from 360 px upwards, and no horizontal scrolling.
+HTML, keyboard-operable controls and responsive layouts designed for mobile widths (including 360 px).
 
 ---
 
@@ -117,33 +119,27 @@ a real, embedded PostgreSQL instance for development.
 # 1. Install dependencies (also generates the Prisma client)
 npm install
 
-# 2. Create your environment file and set a secret
+# 2. Create your environment file and configure local values
 cp .env.example .env
-node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"   # paste into AUTH_SECRET
+# Set DATABASE_URL to the local URL printed below, AUTH_SECRET to a fresh
+# 32-byte random secret, and SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD.
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 # 3. Start a local PostgreSQL server (writes to ./.local-postgres, port 5432)
-npm run db:local:start        # keep this terminal open
+npm run db:local:start        # keep this terminal open; copy the printed URL into .env
 
-# 4. Create the tables and load the seed data
+# 4. Create the tables and load optional development fixtures
 npm run db:deploy
+# Set SEED_DEMO_DATA=true and SEED_DEMO_PASSWORD in .env if you want demo users/data.
 npm run db:seed
 
 # 5. Start the site
 npm run dev                   # http://localhost:3000
 ```
 
-`npm run setup` runs steps 1, 4 and 5's prerequisites in one go (`prisma generate` → migrations → seed).
+`npm run setup` generates the Prisma client, applies pending migrations, and runs the seed script. It does not start the web server.
 
-Sign in with the seeded accounts:
-
-| Role | Email | Password |
-| --- | --- | --- |
-| Administrator | `admin@aurenanails.in` | `Aurena@2026` |
-| Customer | `priya@example.com` | `Customer@123` |
-| Customer | `ananya@example.com` | `Customer@123` |
-| Customer | `meera@example.com` | `Customer@123` |
-
-**Change the administrator password immediately** from `/profile` after your first sign-in.
+The administrator email and password come from `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD`. Optional demo customer accounts and sample appointments require `SEED_DEMO_DATA=true` plus a private `SEED_DEMO_PASSWORD`. The seed never prints passwords or overwrites an existing administrator's password.
 
 ---
 
@@ -161,12 +157,13 @@ committed.
 | `CLOUDINARY_API_KEY` | Production | Cloudinary API key. |
 | `CLOUDINARY_API_SECRET` | Production | Cloudinary API secret — **server-side only, never exposed to the browser**. |
 | `CLOUDINARY_FOLDER` | Optional | Sub-folder inside your Cloudinary account (default `aurena-nails`). |
-| `EMAIL_SERVER` / `EMAIL_USERNAME` / `EMAIL_PASSWORD` / `EMAIL_PORT` / `EMAIL_SECURE` | Optional | SMTP credentials. When empty, reset links are printed to the server console instead of emailed. |
+| `EMAIL_SERVER` / `EMAIL_USERNAME` / `EMAIL_PASSWORD` / `EMAIL_PORT` / `EMAIL_SECURE` | Optional in development; required for account recovery in production | SMTP credentials. When empty, reset links are printed only in development; production never logs reset tokens. |
 | `EMAIL_FROM` | Optional | From-header for outgoing mail. |
 
-When the three `CLOUDINARY_*` credentials are empty the upload API automatically falls back to **local disk
-storage** (`public/uploads`) so that development works without an account. Production deployments should
-always set the Cloudinary credentials.
+When the three `CLOUDINARY_*` credentials are empty, non-production environments fall back to **local disk
+storage** (`public/uploads`) so development works without an account. Production uploads fail safely with a
+service-unavailable response until Cloudinary credentials are configured; uploaded files are never written to
+ephemeral production disk.
 
 ---
 
@@ -224,7 +221,7 @@ npx prisma migrate deploy                     # apply pending migrations (produc
 npx prisma generate                           # regenerate the typed client
 npx prisma studio                             # browse the data in a GUI
 npm run db:deploy                             # this repo's dependency-light deployer (see below)
-npm run db:reset                              # drop everything and re-apply all migrations
+npm run db:reset                              # local development only; drops and reapplies all migrations
 npm run verify:schema                         # assert schema.prisma and the SQL migration agree
 ```
 
@@ -234,9 +231,10 @@ keep:
 
 - `npm run db:deploy` — applies pending SQL migrations with a raw `pg` client and keeps the
   `_prisma_migrations` bookkeeping identical to Prisma's, so `prisma migrate deploy` stays in sync.
-  Supports `--status` and `--reset`.
+  Supports `--status` and `--reset`. Reset is guarded to local development databases only; never point it at
+  Neon or another production database.
 - `npm run verify:schema` — a self-check that compares every table, column, index, constraint and relation
-  in `schema.prisma` with the SQL in the migrations (801 assertions). Handy in CI.
+  in `schema.prisma` with the SQL in the migrations (809 assertions). Handy in CI.
 - `scripts/prisma-generate.mjs` — runs `prisma generate` with a small WASM-backed schema-engine shim so the
   typed client can be generated offline. On a normal machine plain `npx prisma generate` works too.
 
@@ -254,16 +252,11 @@ behave exactly as in Prisma 6.
 npm run db:seed
 ```
 
-`prisma/seed.ts` is idempotent (everything is upserted), so it is safe to run repeatedly. It creates:
-
-- 1 administrator and 3 customers with bcrypt-hashed passwords;
-- the 7 rows of opening hours — **Mon–Fri 10:00–19:00, Sat 10:00–20:00, Sun closed**;
-- 11 categories (services, gallery and videos);
-- 8 services with photos, durations, informational pricing, preparation and after-care instructions;
-- 6 gallery designs so `/gallery` is never empty on a fresh install;
-- a little real history — 3 completed visits with published reviews, 2 upcoming appointments and a
-  wishlist — so the admin dashboard charts, the testimonials and the service ratings are meaningful
-  straight away (skipped automatically if the database already contains appointments).
+`prisma/seed.ts` always provisions the administrator from `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD`,
+never logs the password and never overwrites the password for an existing account. Demo customers, business
+hours, categories, sample services, gallery designs and demo appointment history are created only when
+`SEED_DEMO_DATA=true` and `SEED_DEMO_PASSWORD` is set. Do not enable demo fixtures in production unless
+explicitly intended. Re-running the seed does not reset or delete existing records.
 
 The photos shipped in `public/seed/` are studio-style placeholder images. Replace them with real work by
 uploading through the admin panel — every upload becomes a Cloudinary asset whose URL and metadata are
@@ -298,9 +291,7 @@ previews, per-file progress and drag-to-reorder.
 
 ## Email setup
 
-Email is optional. With SMTP configured, the app sends password-reset links and appointment notifications;
-without it, `sendEmail()` returns `{ delivered: false, skippedReason: "SMTP_NOT_CONFIGURED" }` and the reset
-link is printed to the server console so development is never blocked.
+Email is optional for local development. With SMTP configured, the app sends password-reset links and appointment notifications; without it, a reset link is printed to the server console in development only. Production logs never contain reset tokens, so configure SMTP before enabling account recovery in production.
 
 ```bash
 EMAIL_SERVER="smtp.gmail.com"
@@ -315,11 +306,7 @@ EMAIL_FROM="Aurena Nails <hello@aurenanails.com>"
 
 ## Admin setup
 
-The seed script creates the first administrator:
-
-```txt
-admin@aurenanails.in  /  Aurena@2026
-```
+The seed script provisions the first administrator from `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD`. Set both in the deployment environment before running `npm run db:seed`; secrets are never emitted to logs.
 
 Sign in at **`/admin/login`** — note that the admin sign-in screen is separate from the customer one, and
 customers who try to open `/admin/*` are redirected to `/forbidden` instead of seeing admin data.
@@ -373,7 +360,9 @@ The stack is designed for **Vercel + Neon + Cloudinary**.
 2. **Apply the schema** from your machine, pointed at Neon:
    ```bash
    DATABASE_URL="postgresql://…-pooler…?sslmode=require" npm run db:deploy
-   DATABASE_URL="postgresql://…-pooler…?sslmode=require" npm run db:seed
+   DATABASE_URL="postgresql://…-pooler…?sslmode=require" \
+     SEED_ADMIN_EMAIL="admin@your-domain.example" SEED_ADMIN_PASSWORD="<unique-strong-password>" npm run db:seed
+   # Do not set SEED_DEMO_DATA in production unless you explicitly intend to provision demo data.
    ```
 3. **Push the repository** to GitHub and import it in Vercel. The framework preset is detected
    automatically; the build command is `npm run build` (which runs `prisma generate` first).
@@ -383,9 +372,7 @@ The stack is designed for **Vercel + Neon + Cloudinary**.
 5. **Redeploy** so the variables take effect, then confirm `/sitemap.xml`, `/robots.txt` and a booking flow
    on the live domain.
 
-Any Node host works the same way (Render, Railway, Fly.io, a VPS with `npm run build && npm run start`).
-Serverless/edge hosts are supported because the app uses the Neon-compatible driver adapter with a small,
-reused connection pool.
+Any supported Node.js host works the same way (Render, Railway, Fly.io, or a VPS with `npm run build && npm run start`). Serverless Node.js deployments can use the Neon-compatible driver adapter and its deliberately small connection pool; the database adapter is not an Edge-runtime driver.
 
 **Production checklist**
 
@@ -393,7 +380,7 @@ reused connection pool.
 - [ ] `DATABASE_URL` points at the Neon **pooler** with `sslmode=require`
 - [ ] Cloudinary credentials set, so uploads do not land on ephemeral disk
 - [ ] `NEXT_PUBLIC_APP_URL` matches the real domain
-- [ ] The administrator password has been changed from the seeded one
+- [ ] `SEED_ADMIN_PASSWORD` is a unique strong password and is not printed or reused
 - [ ] `npm run typecheck`, `npm run lint` and `npm run build` pass
 
 ---
@@ -504,9 +491,9 @@ protected prefixes so people land on the right screen immediately, but it is **n
 `requireUser()` and `requireAdmin()` re-read the user from PostgreSQL inside every server action and route
 handler, so a stale cookie can never reach admin data. Deactivated accounts lose access on the next request.
 
-**Media.** `POST /api/upload` authenticates the caller, validates the MIME type and size, uploads to
-Cloudinary (or `public/uploads` when Cloudinary is not configured) and returns the URL plus metadata. Only
-that metadata is persisted.
+**Media.** `POST /api/upload` authenticates the caller, authorizes the upload destination, validates declared
+and actual file types, validates size, uploads to Cloudinary (or `public/uploads` in development) and returns
+the URL plus metadata. Production requires Cloudinary; only media metadata is persisted in Postgres.
 
 **Errors and polish.** Server actions return a typed `ActionResult` (`{ ok, data }` / `{ ok: false, error,
 fieldErrors }`); forms surface field errors inline and everything else through a toast, always with a
@@ -522,8 +509,7 @@ text on every image and colour contrast tuned to the blush-and-cream palette.
 
 ## Database schema notes
 
-19 models, 4 enums, every table with a primary key, `createdAt` and `updatedAt`, plus foreign keys,
-unique constraints and indexes on the columns that are filtered or sorted.
+19 models and 4 enums. Every model has a primary key and `createdAt`; mutable records also have `updatedAt`, while append-only/event records intentionally do not. Foreign keys, unique constraints and indexes protect relationships and common filter/sort paths.
 
 `User`, `Service`, `ServiceImage`, `ServiceVideo`, `GalleryImage`, `Video`, `Appointment`, `Wishlist`,
 `Review`, `ContactMessage`, `Notification`, `PasswordResetToken`, `WebsiteContent`, `BusinessHours`,
@@ -540,6 +526,7 @@ Deliberate design decisions, in case you extend the schema:
 | **`Review` has `@@unique([userId, serviceId])`.** | One review per customer per service, editable afterwards. |
 | **`Wishlist` is one row per user; `WishlistItem` has a CHECK constraint** so it points at exactly one of a service or a gallery design. | The wishlist works for both areas without a polymorphic mess; there is still no cart. |
 | **`PasswordResetToken` stores only a SHA-256 `tokenHash`**, with an expiry and a `usedAt` timestamp. | A leaked database cannot be turned into account takeovers. |
+| **`User.sessionVersion` is included in each session JWT and incremented on password changes or account deactivation.** | Old sessions stop authorizing immediately after a credential or access change. |
 | **`Service.ratingAverage` / `ratingCount`** are cached aggregates. | Service lists and filters can sort by rating without an aggregate query per row; they are recalculated whenever a review changes. |
 | **No media bytes in Postgres.** | Only URLs, public ids and metadata — the requirement for Cloudinary. |
 
@@ -554,13 +541,14 @@ Deliberate design decisions, in case you extend the schema:
 | `npm run start` | Serves the production build |
 | `npm run lint` | ESLint (Next.js config) |
 | `npm run typecheck` | `tsc --noEmit` |
+| `npm run test:regression` | Run focused validator, date, media-type and auth-secret regression tests |
 | `npm run setup` | Generate client → apply migrations → seed |
 | `npm run db:generate` | Regenerate the typed Prisma client |
 | `npm run db:deploy` | Apply migrations (`--status`, `--reset` supported) |
 | `npm run db:migrate` | `prisma migrate dev` — author a new migration |
 | `npm run db:studio` | Prisma Studio GUI |
 | `npm run db:seed` | Seed administrator, customers, hours, categories, services, gallery |
-| `npm run db:reset` | Drop the schema and re-apply every migration |
+| `npm run db:reset` | Reset a local development database only (refuses non-local database URLs) |
 | `npm run db:local:start` / `db:local:stop` | Start / stop the embedded development PostgreSQL |
 | `npm run verify:schema` | Check `schema.prisma` against the SQL migrations |
 
@@ -581,8 +569,8 @@ printed URL.
 **Uploads disappear after a redeploy** — Cloudinary is not configured, so files were written to
 `public/uploads` on ephemeral disk. Set the three `CLOUDINARY_*` variables.
 
-**Password-reset emails never arrive** — `EMAIL_SERVER` is empty. The reset link is printed to the server
-console instead; configure SMTP for real delivery.
+**Password-reset emails never arrive** — `EMAIL_SERVER` is empty or misconfigured. A reset link is printed to
+the server console only in development; configure SMTP for real delivery in production.
 
 **`npm run verify:schema` fails after editing the schema** — you changed `schema.prisma` without adding a
 migration. Run `npx prisma migrate dev --name your_change` (or hand-write the SQL in

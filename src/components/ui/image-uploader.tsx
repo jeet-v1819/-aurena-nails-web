@@ -12,7 +12,7 @@ import { useCallback, useRef, useState } from "react";
 import { ImagePlus, Loader2, Trash2, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { IMAGE_MAX_BYTES, IMAGE_TYPES, VIDEO_MAX_BYTES, VIDEO_TYPES } from "@/lib/constants";
+import { IMAGE_MAX_BYTES, VIDEO_MAX_BYTES, isAllowedMediaType } from "@/lib/constants";
 
 export type UploadedFile = {
   url: string;
@@ -51,18 +51,13 @@ export function ImageUploader({
   const [dragging, setDragging] = useState(false);
   const [pending, setPending] = useState<PendingFile[]>([]);
 
-  const allowedTypes = kind === "image" ? IMAGE_TYPES : VIDEO_TYPES;
   const maxBytes = kind === "image" ? IMAGE_MAX_BYTES : VIDEO_MAX_BYTES;
   const defaultAccept = kind === "image" ? "image/jpeg,image/jpg,image/png,image/webp" : "video/mp4,video/webm,video/quicktime";
 
   /** Rendered client-side for instant feedback; the server re-validates. */
   const validate = useCallback(
     (file: File) => {
-      const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
-      const extensionOk =
-        kind === "image" ? ["jpg", "jpeg", "png", "webp"].includes(extension) : ["mp4", "webm", "mov"].includes(extension);
-
-      if (!allowedTypes.includes(file.type as never) && !extensionOk) {
+      if (!isAllowedMediaType(file.name, file.type, kind)) {
         toast.error(
           kind === "image"
             ? "Only JPG, JPEG, PNG and WEBP images are supported."
@@ -76,12 +71,16 @@ export function ImageUploader({
       }
       return true;
     },
-    [allowedTypes, kind, maxBytes]
+    [kind, maxBytes]
   );
 
   const upload = useCallback(
     async (files: File[]) => {
-      const valid = files.filter(validate).slice(0, multiple ? maxFiles : 1);
+      if (files.length > (multiple ? maxFiles : 1)) {
+        toast.error(multiple ? `Please select at most ${maxFiles} files.` : "Please upload one file at a time.");
+        return;
+      }
+      const valid = files.filter(validate);
       if (!valid.length) return;
 
       const formData = new FormData();
@@ -89,8 +88,8 @@ export function ImageUploader({
       formData.append("folder", folder);
       for (const file of valid) formData.append("file", file);
 
-      const tracked: PendingFile[] = valid.map((file) => ({
-        id: `${file.name}-${file.lastModified}`,
+      const tracked: PendingFile[] = valid.map((file, index) => ({
+        id: `${file.name}-${file.lastModified}-${index}`,
         name: file.name,
         progress: 8,
       }));
@@ -103,8 +102,8 @@ export function ImageUploader({
           request.open("POST", "/api/upload");
 
           request.upload.onprogress = (event) => {
-            if (!event.lengthComputable) return;
-            const percent = Math.round((event.loaded / event.total) * 100);
+          if (!event.lengthComputable) return;
+          const percent = Math.round((event.loaded / event.total) * 100);
             setPending((current) => current.map((item) => ({ ...item, progress: Math.max(item.progress, percent) })));
           };
 
@@ -147,11 +146,13 @@ export function ImageUploader({
     <div className={className}>
       <div
         role="button"
-        tabIndex={0}
+        tabIndex={busy ? -1 : 0}
         aria-label={label ?? `Upload ${kind}`}
+        aria-disabled={busy}
+        aria-busy={busy}
         onClick={() => !busy && inputRef.current?.click()}
         onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
+          if (!busy && (event.key === "Enter" || event.key === " ")) {
             event.preventDefault();
             inputRef.current?.click();
           }
@@ -189,6 +190,7 @@ export function ImageUploader({
           ref={inputRef}
           type="file"
           className="sr-only"
+          disabled={busy}
           accept={accept ?? defaultAccept}
           multiple={multiple}
           onChange={(event) => void upload(Array.from(event.target.files ?? []))}
@@ -203,7 +205,14 @@ export function ImageUploader({
                 <span className="truncate">{file.name}</span>
                 <span className="text-muted">{file.progress}%</span>
               </div>
-              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-cream-deep">
+              <div
+                className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-cream-deep"
+                role="progressbar"
+                aria-label={`Upload progress for ${file.name}`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={file.progress}
+              >
                 <div
                   className="h-full rounded-full bg-gradient-to-r from-rosegold to-rosegold-dark transition-all"
                   style={{ width: `${file.progress}%` }}

@@ -24,7 +24,11 @@ const serverExternalPackages = [
  * preview; set `ALLOW_FRAME_EMBEDDING=true` there (never in production) to fall
  * back to a `frame-ancestors` policy that permits it.
  */
-const allowFraming = process.env.ALLOW_FRAME_EMBEDDING === "true";
+const allowFraming = process.env.NODE_ENV !== "production" && process.env.ALLOW_FRAME_EMBEDDING === "true";
+const transportSecurityHeaders =
+  process.env.NODE_ENV === "production"
+    ? [{ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" }]
+    : [];
 const frameHeaders = allowFraming
   ? [{ key: "Content-Security-Policy", value: "frame-ancestors *" }]
   : [{ key: "X-Frame-Options", value: "SAMEORIGIN" }];
@@ -35,13 +39,11 @@ const nextConfig: NextConfig = {
   serverExternalPackages,
 
   images: {
-    // Cloudinary serves every uploaded asset; local development uploads are
-    // served from /public/uploads. Remote avatars (Google/Gravatar style) are
-    // allowed over https only.
+    // Cloudinary serves uploaded assets; local development uploads are served
+    // from /public/uploads. Remote images are restricted to the trusted hosts below.
     remotePatterns: [
       { protocol: "https", hostname: "res.cloudinary.com" },
       { protocol: "https", hostname: "images.unsplash.com" },
-      { protocol: "https", hostname: "**" },
     ],
     formats: ["image/avif", "image/webp"],
     minimumCacheTTL: 3600,
@@ -60,6 +62,7 @@ const nextConfig: NextConfig = {
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           ...frameHeaders,
+          ...transportSecurityHeaders,
         ],
       },
     ];

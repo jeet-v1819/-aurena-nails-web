@@ -23,18 +23,18 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   try {
     const [services, designs, videos] = await Promise.all([
       prisma.service.findMany({
-        where: { isActive: true, deletedAt: null },
+        where: { isActive: true, deletedAt: null, category: { type: "SERVICE" } },
         select: { slug: true, updatedAt: true },
         orderBy: { sortOrder: "asc" },
       }),
       prisma.galleryImage.findMany({
-        where: { isActive: true, deletedAt: null },
+        where: { isActive: true, deletedAt: null, category: { type: "GALLERY" } },
         select: { id: true, createdAt: true },
         orderBy: { createdAt: "desc" },
         take: 500,
       }),
       prisma.video.findMany({
-        where: { isActive: true, deletedAt: null },
+        where: { isActive: true, deletedAt: null, category: { type: "VIDEO" } },
         select: { id: true, publishedAt: true },
         orderBy: { publishedAt: "desc" },
         take: 200,

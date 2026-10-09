@@ -7,6 +7,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { deleteMedia } from "@/lib/media/storage";
 import { recordAudit } from "./audit";
+import { AppError } from "@/lib/errors";
 
 export type GalleryFilters = {
   search?: string;
@@ -76,7 +77,7 @@ function galleryWhere(filters: GalleryFilters): Prisma.GalleryImageWhereInput {
     deletedAt: null,
     ...(filters.includeInactive ? {} : { isActive: true }),
     ...(filters.featured ? { isFeatured: true } : {}),
-    ...(filters.categorySlug ? { category: { slug: filters.categorySlug } } : {}),
+    category: { type: "GALLERY", ...(filters.categorySlug ? { slug: filters.categorySlug } : {}) },
     ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
     ...(filters.style ? { style: filters.style } : {}),
     ...(filters.occasion ? { occasion: filters.occasion } : {}),
@@ -136,7 +137,7 @@ export async function listGalleryImages(filters: GalleryFilters = {}) {
 
 export const getGalleryImageById = cache(async (id: string) => {
   const image = await prisma.galleryImage.findFirst({
-    where: { id, deletedAt: null },
+    where: { id, isActive: true, deletedAt: null, category: { type: "GALLERY" } },
     include: { category: { select: { id: true, name: true, slug: true } } },
   });
   return image ? toGalleryDTO(image) : null;
@@ -144,7 +145,7 @@ export const getGalleryImageById = cache(async (id: string) => {
 
 export async function getRelatedGalleryImages(imageId: string, categoryId: string, take = 4) {
   const rows = await prisma.galleryImage.findMany({
-    where: { id: { not: imageId }, categoryId, isActive: true, deletedAt: null },
+    where: { id: { not: imageId }, categoryId, isActive: true, deletedAt: null, category: { type: "GALLERY" } },
     include: { category: { select: { id: true, name: true, slug: true } } },
     orderBy: { createdAt: "desc" },
     take,
@@ -155,7 +156,7 @@ export async function getRelatedGalleryImages(imageId: string, categoryId: strin
 /** Every tag in use, with how many designs carry it (for the filter UI). */
 export const getGalleryTags = cache(async () => {
   const rows = await prisma.galleryImage.findMany({
-    where: { isActive: true, deletedAt: null },
+    where: { isActive: true, deletedAt: null, category: { type: "GALLERY" } },
     select: { tags: true },
   });
   const counts = new Map<string, number>();
@@ -220,7 +221,13 @@ function toData(input: GalleryInput): Prisma.GalleryImageUncheckedCreateInput {
   };
 }
 
+async function requireGalleryCategory(categoryId: string) {
+  const category = await prisma.category.findFirst({ where: { id: categoryId, type: "GALLERY" }, select: { id: true } });
+  if (!category) throw new AppError("Choose a valid gallery category.", "VALIDATION");
+}
+
 export async function createGalleryImage(adminId: string, input: GalleryInput) {
+  await requireGalleryCategory(input.categoryId);
   const image = await prisma.galleryImage.create({ data: { ...toData(input), uploadedById: adminId } });
   await recordAudit({ actorId: adminId, action: "gallery.create", entity: "GalleryImage", entityId: image.id });
   return image;
@@ -232,6 +239,10 @@ export async function createGalleryImages(
   inputs: Array<GalleryInput & { fileName?: string }>,
   defaults: { categoryId: string; tags: string[]; style?: string; occasion?: string; isActive: boolean; isFeatured: boolean }
 ) {
+  const categoryIds = [...new Set([...inputs.map((input) => input.categoryId || defaults.categoryId), defaults.categoryId])];
+  const validCategories = await prisma.category.count({ where: { id: { in: categoryIds }, type: "GALLERY" } });
+  if (validCategories !== categoryIds.length) throw new AppError("Choose valid gallery categories.", "VALIDATION");
+
   const created = await prisma.$transaction(
     inputs.map((input, index) =>
       prisma.galleryImage.create({
@@ -263,6 +274,7 @@ export async function createGalleryImages(
 }
 
 export async function updateGalleryImage(adminId: string, imageId: string, input: GalleryInput) {
+  await requireGalleryCategory(input.categoryId);
   const existing = await prisma.galleryImage.findUnique({ where: { id: imageId }, select: { publicId: true, url: true } });
 
   const image = await prisma.galleryImage.update({
@@ -271,7 +283,7 @@ export async function updateGalleryImage(adminId: string, imageId: string, input
   });
 
   // A replaced image leaves its old asset behind — clean it up.
-  if (existing?.publicId && input.publicId && existing.publicId !== input.publicId) {
+  if (existing?.publicId && existing.publicId !== (input.publicId || null)) {
     await deleteMedia(existing.publicId, "image");
   }
 

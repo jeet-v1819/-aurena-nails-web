@@ -275,6 +275,7 @@ check(
 );
 for (const constraint of [
   "Appointment_time_range_check",
+  "Appointment_active_no_overlap",
   "Review_rating_range_check",
   "BusinessHours_day_range_check",
   "BusinessHours_window_check",

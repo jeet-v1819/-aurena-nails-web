@@ -1,26 +1,13 @@
 /**
  * Database seed — `npm run db:seed` (or `npx prisma db seed`).
  *
- * Creates everything a fresh Aurena Nails installation needs:
- *   • 1 administrator and 3 customers (bcrypt-hashed passwords)
- *   • opening hours — Mon–Fri 10:00–19:00, Sat 10:00–20:00, Sun closed
- *   • categories for services, the gallery and the video library
- *   • 8 sample services with photos, durations, prices, preparation and
- *     after-care instructions
- *   • 6 gallery designs
- *   • a little history (completed visits with reviews, two upcoming
- *     appointments and a wishlist) so the dashboard and ratings are meaningful
+ * Creates the initial administrator using SEED_ADMIN_EMAIL and
+ * SEED_ADMIN_PASSWORD. Optional demo data is enabled only with
+ * SEED_DEMO_DATA=true and requires a separate SEED_DEMO_PASSWORD.
  *
- * Every step is idempotent: users, categories, services, hours and gallery
- * records are upserted, and the demo history is skipped once the database
- * contains appointments. Running the seed twice never duplicates anything and
- * never overwrites a password you have already changed.
- *
- * Sign-in details after seeding:
- *   Administrator  admin@aurenanails.in  /  Aurena@2026
- *   Customer       priya@example.com     /  Customer@123
- *   Customer       ananya@example.com    /  Customer@123
- *   Customer       meera@example.com     /  Customer@123
+ * The seed is idempotent and deliberately never prints passwords or resets an
+ * existing administrator's password. Production seeds create only the admin
+ * unless demo data is explicitly requested.
  */
 import { loadEnv } from "../scripts/load-env.mjs";
 
@@ -29,11 +16,11 @@ import { loadEnv } from "../scripts/load-env.mjs";
 loadEnv({ cwd: process.cwd() });
 
 const ADMIN = {
-  firstName: "Aurena",
-  lastName: "Admin",
-  email: "admin@aurenanails.in",
-  mobile: "+919820045678",
-  password: "Aurena@2026",
+  firstName: process.env.SEED_ADMIN_FIRST_NAME?.trim() || "Studio",
+  lastName: process.env.SEED_ADMIN_LAST_NAME?.trim() || "Administrator",
+  email: process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase() ?? "",
+  mobile: process.env.SEED_ADMIN_MOBILE?.trim() || "+919820045678",
+  password: process.env.SEED_ADMIN_PASSWORD ?? "",
 };
 
 const CUSTOMERS = [
@@ -41,7 +28,8 @@ const CUSTOMERS = [
   { firstName: "Ananya", lastName: "Rao", email: "ananya@example.com", mobile: "+919812345671" },
   { firstName: "Meera", lastName: "Kapoor", email: "meera@example.com", mobile: "+919812345672" },
 ];
-const CUSTOMER_PASSWORD = "Customer@123";
+const DEMO_DATA_ENABLED = process.env.SEED_DEMO_DATA === "true";
+const CUSTOMER_PASSWORD = process.env.SEED_DEMO_PASSWORD ?? "";
 
 const SERVICE_CATEGORIES = [
   { name: "Gel Nails", slug: "gel-nails", description: "Long-lasting gel polish and gel extensions.", sortOrder: 1 },
@@ -373,27 +361,31 @@ type Runtime = {
 
 async function seedUsers(runtime: Runtime) {
   // Passwords are hashed with the same helper the application uses (bcrypt, cost 12).
-  const [adminHash, customerHash] = await Promise.all([
-    runtime.hashPassword(ADMIN.password),
-    runtime.hashPassword(CUSTOMER_PASSWORD),
-  ]);
-
-  const { password: _adminPassword, ...adminProfile } = ADMIN;
+  const adminHash = await runtime.hashPassword(ADMIN.password);
+  const adminProfile = {
+    firstName: ADMIN.firstName,
+    lastName: ADMIN.lastName,
+    email: ADMIN.email,
+    mobile: ADMIN.mobile,
+  };
   const admin = await runtime.prisma.user.upsert({
     where: { email: ADMIN.email },
     update: { role: "ADMIN", isActive: true },
     create: { ...adminProfile, passwordHash: adminHash, role: "ADMIN", isActive: true },
   });
 
-  for (const customer of CUSTOMERS) {
-    await runtime.prisma.user.upsert({
-      where: { email: customer.email },
-      update: { isActive: true },
-      create: { ...customer, passwordHash: customerHash, role: "CUSTOMER", isActive: true },
-    });
+  if (DEMO_DATA_ENABLED) {
+    const customerHash = await runtime.hashPassword(CUSTOMER_PASSWORD);
+    for (const customer of CUSTOMERS) {
+      await runtime.prisma.user.upsert({
+        where: { email: customer.email },
+        update: { isActive: true },
+        create: { ...customer, passwordHash: customerHash, role: "CUSTOMER", isActive: true },
+      });
+    }
   }
 
-  console.log(`✓ users (1 admin, ${CUSTOMERS.length} customers)`);
+  console.log(`✓ users (1 admin${DEMO_DATA_ENABLED ? `, ${CUSTOMERS.length} demo customers` : ""})`);
   return admin;
 }
 
@@ -705,6 +697,16 @@ async function seedDemoHistory(runtime: Runtime) {
 }
 
 async function main() {
+  if (!ADMIN.email || !ADMIN.password) {
+    throw new Error("Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD before running the database seed.");
+  }
+  if (DEMO_DATA_ENABLED && !CUSTOMER_PASSWORD) {
+    throw new Error("SEED_DEMO_DATA=true requires a private SEED_DEMO_PASSWORD.");
+  }
+  if (process.env.NODE_ENV === "production" && DEMO_DATA_ENABLED && process.env.ALLOW_PRODUCTION_DEMO_SEED !== "true") {
+    throw new Error("Refusing to seed demo accounts and appointments in production without ALLOW_PRODUCTION_DEMO_SEED=true.");
+  }
+
   // Imported lazily: these modules read DATABASE_URL when they are evaluated, so
   // the environment has to be loaded first. (tsx compiles this file to CommonJS,
   // where top-level `await` is not allowed — hence the dynamic imports.)
@@ -713,18 +715,17 @@ async function main() {
   const runtime: Runtime = { prisma, hashPassword };
 
   console.log("Seeding Aurena Nails…\n");
-
-  const categoryIds = await seedCategories(runtime);
   await seedUsers(runtime);
-  await seedBusinessHours(runtime);
-  await seedServices(runtime, categoryIds);
-  await seedGallery(runtime, categoryIds);
-  await seedDemoHistory(runtime);
 
-  console.log("\nDone. Sign in with:");
-  console.log(`  Administrator  ${ADMIN.email}  /  ${ADMIN.password}`);
-  for (const customer of CUSTOMERS) console.log(`  Customer       ${customer.email}  /  ${CUSTOMER_PASSWORD}`);
+  if (DEMO_DATA_ENABLED) {
+    const categoryIds = await seedCategories(runtime);
+    await seedBusinessHours(runtime);
+    await seedServices(runtime, categoryIds);
+    await seedGallery(runtime, categoryIds);
+    await seedDemoHistory(runtime);
+  }
 
+  console.log("\nDone. Administrator provisioning finished; passwords were not logged.");
   await prisma.$disconnect();
 }
 

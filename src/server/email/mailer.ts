@@ -9,6 +9,7 @@
  */
 import "server-only";
 import nodemailer, { type Transporter } from "nodemailer";
+import { escapeHtml } from "@/lib/html";
 
 export type SendEmailInput = {
   to: string;
@@ -62,7 +63,7 @@ export async function sendEmail({ to, subject, html, text }: SendEmailInput): Pr
     await mailer.sendMail({
       from: process.env.EMAIL_FROM ?? "Aurena Nails <hello@aurenanails.com>",
       to,
-      subject,
+      subject: subject.replace(/[\r\n]+/g, " ").slice(0, 200),
       text,
       html,
     });
@@ -87,13 +88,13 @@ export function emailLayout(title: string, body: string, footerNote?: string) {
       </tr>
       <tr>
         <td style="padding:32px;">
-          <h1 style="font-family:Georgia,'Times New Roman',serif;font-size:22px;font-weight:500;margin:0 0 16px;">${title}</h1>
+          <h1 style="font-family:Georgia,'Times New Roman',serif;font-size:22px;font-weight:500;margin:0 0 16px;">${escapeHtml(title)}</h1>
           <div style="font-size:15px;line-height:1.7;color:#4a4045;">${body}</div>
         </td>
       </tr>
       <tr>
         <td style="padding:20px 32px 28px;border-top:1px solid #e9ded7;font-size:12px;color:#7c6f73;">
-          ${footerNote ?? "Aurena Nails · Bandra West, Mumbai · hello@aurenanails.com"}
+          ${escapeHtml(footerNote ?? "Aurena Nails · Bandra West, Mumbai · hello@aurenanails.com")}
         </td>
       </tr>
     </table>
@@ -103,7 +104,7 @@ export function emailLayout(title: string, body: string, footerNote?: string) {
 
 export function emailButton(url: string, label: string) {
   return `<p style="margin:24px 0;">
-    <a href="${url}" style="display:inline-block;background:#b76e79;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:999px;font-size:14px;">${label}</a>
+    <a href="${escapeHtml(url)}" style="display:inline-block;background:#b76e79;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:999px;font-size:14px;">${escapeHtml(label)}</a>
   </p>
-  <p style="font-size:12px;color:#7c6f73;word-break:break-all;">${url}</p>`;
+  <p style="font-size:12px;color:#7c6f73;word-break:break-all;">${escapeHtml(url)}</p>`;
 }

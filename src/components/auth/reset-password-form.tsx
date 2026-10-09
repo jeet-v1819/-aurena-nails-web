@@ -6,7 +6,7 @@
  */
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { resetPasswordAction } from "@/server/actions/auth";
@@ -25,7 +25,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     setError,
     formState: { errors, isSubmitting },
   } = useForm<ResetValues>({
@@ -33,7 +33,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
     defaultValues: { token, password: "", confirmPassword: "" },
   });
 
-  const password = watch("password") ?? "";
+  const password = useWatch({ control, name: "password" }) ?? "";
 
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);

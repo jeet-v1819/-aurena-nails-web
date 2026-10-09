@@ -11,6 +11,7 @@ import { GalleryCard } from "@/components/site/cards";
 import { SaveToWishlist } from "@/components/site/save-to-wishlist";
 import { Badge, Divider, SectionHeading } from "@/components/ui/primitives";
 import { formatDate } from "@/lib/format";
+import { serializeJsonLd } from "@/lib/seo";
 
 type PageProps = { params: Promise<{ id: string }> };
 
@@ -59,7 +60,7 @@ export default async function GalleryDetailPage({ params }: PageProps) {
 
   return (
     <>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }} />
 
       <section className="section pb-8 pt-10">
         <div className="container-page">

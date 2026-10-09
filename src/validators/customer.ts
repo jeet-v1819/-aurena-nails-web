@@ -23,6 +23,7 @@ const password = z
   .string()
   .min(8, "Password must be at least 8 characters long.")
   .max(72, "Password is too long.")
+  .refine((value) => new TextEncoder().encode(value).byteLength <= 72, "Password is too long.")
   .regex(/[a-z]/, "Include at least one lowercase letter.")
   .regex(/[A-Z]/, "Include at least one uppercase letter.")
   .regex(/\d/, "Include at least one number.");
@@ -40,7 +41,9 @@ export const registerSchema = z
     /** Optional Cloudinary URL produced by the upload widget. */
     avatarUrl: z.string().trim().optional().or(z.literal("")),
     avatarPublicId: z.string().trim().optional().or(z.literal("")),
-    acceptTerms: z.union([z.literal("on"), z.literal("true"), z.boolean()]).optional(),
+    acceptTerms: z
+      .union([z.literal("on"), z.literal("true"), z.boolean()])
+      .refine((accepted) => accepted === true || accepted === "on" || accepted === "true", "Please accept before continuing."),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords do not match.",

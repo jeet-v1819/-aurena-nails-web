@@ -172,7 +172,13 @@ export function ContentForm({
                     ) : (
                       <input
                         id={field.key}
-                        type={field.type === "url" ? "url" : field.type === "tel" ? "tel" : field.type === "email" ? "email" : "text"}
+                        type={
+                          field.type === "url" || field.type === "tel" || field.type === "email" || field.type === "number"
+                            ? field.type
+                            : "text"
+                        }
+                        min={field.type === "number" ? 0 : undefined}
+                        step={field.type === "number" ? 1 : undefined}
                         className="input mt-2"
                         value={value}
                         onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}

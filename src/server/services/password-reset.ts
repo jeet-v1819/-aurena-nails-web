@@ -35,19 +35,23 @@ export async function requestPasswordReset(rawEmail: string) {
 
   if (!user || !user.isActive) return genericResponse;
 
-  // Invalidate previous tokens so only the newest link works.
-  await prisma.passwordResetToken.updateMany({
-    where: { userId: user.id, usedAt: null },
-    data: { usedAt: new Date() },
-  });
-
   const { token, tokenHash } = generateResetToken();
-  await prisma.passwordResetToken.create({
-    data: {
-      userId: user.id,
-      tokenHash,
-      expiresAt: new Date(Date.now() + TOKEN_TTL_MINUTES * 60 * 1000),
-    },
+  const now = new Date();
+  await prisma.$transaction(async (tx) => {
+    // Concurrent requests for the same account serialize, so the second
+    // request invalidates the first token even when both were submitted at once.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(1096118608, hashtext(${user.id}))`;
+    await tx.passwordResetToken.updateMany({
+      where: { userId: user.id, usedAt: null },
+      data: { usedAt: now },
+    });
+    await tx.passwordResetToken.create({
+      data: {
+        userId: user.id,
+        tokenHash,
+        expiresAt: new Date(now.getTime() + TOKEN_TTL_MINUTES * 60 * 1000),
+      },
+    });
   });
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
@@ -55,17 +59,22 @@ export async function requestPasswordReset(rawEmail: string) {
   const message = passwordResetEmail(user.firstName, link, TOKEN_TTL_MINUTES);
   const delivery = await sendEmail({ to: user.email, ...message });
 
-  if (!delivery.delivered) {
-    // Development convenience: the link is printed by the mailer.
+  if (!delivery.delivered && process.env.NODE_ENV !== "production") {
+    // Development convenience only. Reset tokens must never be written to
+    // production logs, where they could be replayed by anyone with log access.
     console.info(`[password-reset] reset link for ${user.email}: ${link}`);
   }
 
-  await createNotification({
-    userId: user.id,
-    type: "ACCOUNT",
-    title: "Password reset requested",
-    message: "A password reset link was requested for your account. It expires in 30 minutes.",
-  });
+  try {
+    await createNotification({
+      userId: user.id,
+      type: "ACCOUNT",
+      title: "Password reset requested",
+      message: "A password reset link was requested for your account. It expires in 30 minutes.",
+    });
+  } catch (error) {
+    console.error("[password-reset] request notification could not be created:", error);
+  }
 
   return genericResponse;
 }
@@ -77,7 +86,7 @@ export async function verifyResetToken(token: string) {
     include: { user: { select: { id: true, email: true, firstName: true, isActive: true, deletedAt: true } } },
   });
 
-  if (!record || record.usedAt || record.expiresAt.getTime() < Date.now()) return null;
+  if (!record || record.usedAt || record.expiresAt.getTime() <= Date.now()) return null;
   if (!record.user.isActive || record.user.deletedAt) return null;
 
   return record;
@@ -100,22 +109,50 @@ export async function resetPassword(token: string, newPassword: string): Promise
 
   const passwordHash = await hashPassword(newPassword);
 
-  await prisma.$transaction([
-    prisma.user.update({ where: { id: record.userId }, data: { passwordHash } }),
-    prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-    // Any other outstanding link is invalidated as well.
-    prisma.passwordResetToken.updateMany({
-      where: { userId: record.userId, usedAt: null, NOT: { id: record.id } },
-      data: { usedAt: new Date() },
-    }),
-  ]);
+  const now = new Date();
+  const redeemed = await prisma.$transaction(async (tx) => {
+    // Claim the token conditionally inside the same transaction as the password
+    // update. Two concurrent reset requests can no longer both pass an earlier
+    // read and overwrite each other's password.
+    const claim = await tx.passwordResetToken.updateMany({
+      where: { id: record.id, usedAt: null, expiresAt: { gt: now } },
+      data: { usedAt: now },
+    });
+    if (claim.count !== 1) return false;
 
-  await createNotification({
-    userId: record.userId,
-    type: "ACCOUNT",
-    title: "Password changed",
-    message: "Your password was reset successfully. You can now sign in with your new password.",
+    const userUpdate = await tx.user.updateMany({
+      where: { id: record.userId, isActive: true, deletedAt: null },
+      data: { passwordHash, sessionVersion: { increment: 1 } },
+    });
+    if (userUpdate.count !== 1) return false;
+
+    // Any other outstanding link is invalidated as well.
+    await tx.passwordResetToken.updateMany({
+      where: { userId: record.userId, usedAt: null, NOT: { id: record.id } },
+      data: { usedAt: now },
+    });
+
+    return true;
   });
+
+  if (!redeemed) {
+    return {
+      ok: false,
+      error: "This reset link has expired or has already been used. Please request a new one.",
+      fieldErrors: { token: ["This reset link is no longer valid."] },
+    };
+  }
+
+  try {
+    await createNotification({
+      userId: record.userId,
+      type: "ACCOUNT",
+      title: "Password changed",
+      message: "Your password was reset successfully. You can now sign in with your new password.",
+    });
+  } catch (error) {
+    console.error("[password-reset] completion notification could not be created:", error);
+  }
 
   return { ok: true };
 }

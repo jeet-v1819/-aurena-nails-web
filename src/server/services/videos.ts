@@ -7,6 +7,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { deleteMedia } from "@/lib/media/storage";
 import { recordAudit } from "./audit";
+import { AppError } from "@/lib/errors";
 
 export type VideoFilters = {
   search?: string;
@@ -72,7 +73,7 @@ function videoWhere(filters: VideoFilters): Prisma.VideoWhereInput {
     deletedAt: null,
     ...(filters.includeInactive ? {} : { isActive: true }),
     ...(filters.featured ? { isFeatured: true } : {}),
-    ...(filters.categorySlug ? { category: { slug: filters.categorySlug } } : {}),
+    category: { type: "VIDEO", ...(filters.categorySlug ? { slug: filters.categorySlug } : {}) },
     ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
     ...(filters.tag ? { tags: { has: filters.tag } } : {}),
     ...(search
@@ -127,7 +128,7 @@ export async function listVideos(filters: VideoFilters = {}) {
 
 export const getVideoById = cache(async (id: string) => {
   const video = await prisma.video.findFirst({
-    where: { id, deletedAt: null },
+    where: { id, isActive: true, deletedAt: null, category: { type: "VIDEO" } },
     include: { category: { select: { id: true, name: true, slug: true } } },
   });
   if (!video) return null;
@@ -138,7 +139,7 @@ export const getVideoById = cache(async (id: string) => {
 
 export async function getRelatedVideos(videoId: string, categoryId: string, take = 4) {
   const rows = await prisma.video.findMany({
-    where: { id: { not: videoId }, categoryId, isActive: true, deletedAt: null },
+    where: { id: { not: videoId }, categoryId, isActive: true, deletedAt: null, category: { type: "VIDEO" } },
     include: { category: { select: { id: true, name: true, slug: true } } },
     orderBy: { publishedAt: "desc" },
     take,
@@ -195,14 +196,33 @@ function toData(input: VideoInput): Prisma.VideoUncheckedCreateInput {
   };
 }
 
+async function requireVideoCategory(categoryId: string) {
+  const category = await prisma.category.findFirst({ where: { id: categoryId, type: "VIDEO" }, select: { id: true } });
+  if (!category) throw new AppError("Choose a valid video category.", "VALIDATION");
+}
+
 export async function createVideo(adminId: string, input: VideoInput) {
+  await requireVideoCategory(input.categoryId);
   const video = await prisma.video.create({ data: toData(input) });
   await recordAudit({ actorId: adminId, action: "video.create", entity: "Video", entityId: video.id });
   return video;
 }
 
 export async function updateVideo(adminId: string, videoId: string, input: VideoInput) {
+  await requireVideoCategory(input.categoryId);
+  const existing = await prisma.video.findUnique({
+    where: { id: videoId },
+    select: { publicId: true, thumbnailPublicId: true },
+  });
   const video = await prisma.video.update({ where: { id: videoId }, data: toData(input) });
+
+  if (existing?.publicId && existing.publicId !== (input.publicId || null)) {
+    await deleteMedia(existing.publicId, "video");
+  }
+  if (existing?.thumbnailPublicId && existing.thumbnailPublicId !== (input.thumbnailPublicId || null)) {
+    await deleteMedia(existing.thumbnailPublicId, "image");
+  }
+
   await recordAudit({ actorId: adminId, action: "video.update", entity: "Video", entityId: videoId });
   return video;
 }

@@ -1,16 +1,13 @@
 /**
  * Media storage abstraction.
  *
- *   Cloudinary  → used whenever CLOUDINARY_* credentials are configured
- *   Local disk  → automatic fallback (./public/uploads) so development,
- *                 previews and tests work without any external account
- *
- * Only metadata (URL, public id, size, dimensions, duration) is stored in
- * PostgreSQL; the file itself never touches the database.
+ * Cloudinary is the production storage provider. A local-filesystem fallback is
+ * available only outside production so previews and development remain usable
+ * without external credentials. Binary files are never stored in PostgreSQL.
  */
 import "server-only";
 import { v2 as cloudinary } from "cloudinary";
-import { IMAGE_MAX_BYTES, IMAGE_TYPES, VIDEO_MAX_BYTES, VIDEO_TYPES } from "@/lib/constants";
+import { IMAGE_MAX_BYTES, VIDEO_MAX_BYTES, isAllowedMediaType } from "@/lib/constants";
 
 export type StorageKind = "cloudinary" | "local";
 
@@ -27,15 +24,43 @@ export type UploadedMedia = {
   storage: StorageKind;
 };
 
-export function storageKind(): StorageKind {
-  const configured = Boolean(
+export class MediaError extends Error {
+  code: string;
+
+  constructor(message: string, code = "MEDIA_ERROR") {
+    super(message);
+    this.name = "MediaError";
+    this.code = code;
+  }
+}
+
+const UPLOAD_FOLDER_SEGMENT = /^[a-zA-Z0-9_-]+$/;
+
+/** Rejects parent paths and other path-like input before Cloudinary or disk I/O. */
+export function sanitizeUploadFolder(folder: string) {
+  const segments = folder.replace(/\\/g, "/").split("/");
+  if (!segments.length || segments.some((segment) => !UPLOAD_FOLDER_SEGMENT.test(segment))) {
+    throw new MediaError("The upload destination is invalid.", "INVALID_FOLDER");
+  }
+  return segments.join("/");
+}
+
+function hasCloudinaryCredentials() {
+  return Boolean(
     process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET
   );
-  return configured ? "cloudinary" : "local";
+}
+
+export function storageKind(): StorageKind {
+  if (hasCloudinaryCredentials()) return "cloudinary";
+  if (process.env.NODE_ENV === "production") {
+    throw new MediaError("Cloudinary storage is not configured for this production environment.", "STORAGE_NOT_CONFIGURED");
+  }
+  return "local";
 }
 
 export function isCloudinaryConfigured() {
-  return storageKind() === "cloudinary";
+  return hasCloudinaryCredentials();
 }
 
 let cloudinaryReady = false;
@@ -53,22 +78,12 @@ function cloudinaryClient() {
   return cloudinary;
 }
 
-export class MediaError extends Error {
-  code: string;
-
-  constructor(message: string, code = "MEDIA_ERROR") {
-    super(message);
-    this.name = "MediaError";
-    this.code = code;
-  }
-}
-
 /**
  * Validates file type and size *on the server* — the client-side check is only
- * a convenience and can always be bypassed.
+ * a convenience. Extension and declared MIME type must agree; uploadMedia also
+ * checks the actual file signature before storing anything.
  */
 export function validateFile(file: File, kind: "image" | "video") {
-  const allowed: readonly string[] = kind === "image" ? IMAGE_TYPES : VIDEO_TYPES;
   const maxBytes = kind === "image" ? IMAGE_MAX_BYTES : VIDEO_MAX_BYTES;
 
   if (!file || file.size === 0) {
@@ -77,14 +92,12 @@ export function validateFile(file: File, kind: "image" | "video") {
 
   const mime = (file.type || "").toLowerCase();
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
-  const extensionAllowed =
-    kind === "image" ? ["jpg", "jpeg", "png", "webp"].includes(extension) : ["mp4", "webm", "mov"].includes(extension);
 
-  if (!allowed.includes(mime) && !extensionAllowed) {
+  if (!isAllowedMediaType(file.name, mime, kind)) {
     throw new MediaError(
       kind === "image"
-        ? "Only JPG, JPEG, PNG and WEBP images are supported."
-        : "Only MP4, WEBM and MOV videos are supported.",
+        ? "Only matching JPG, JPEG, PNG and WEBP image files are supported."
+        : "Only matching MP4, WEBM and MOV video files are supported.",
       "INVALID_TYPE"
     );
   }
@@ -93,22 +106,57 @@ export function validateFile(file: File, kind: "image" | "video") {
     const limit = Math.round(maxBytes / (1024 * 1024));
     throw new MediaError(`That file is too large. The maximum size is ${limit} MB.`, "TOO_LARGE");
   }
+
+  return { extension, mime };
 }
 
-/** Uploads a single file and returns the metadata to persist. */
+function hasExpectedSignature(buffer: Buffer, kind: "image" | "video", extension: string) {
+  if (kind === "image") {
+    if (extension === "jpg" || extension === "jpeg") {
+      return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    }
+    if (extension === "png") {
+      return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    }
+    if (extension === "webp") {
+      return buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP";
+    }
+    return false;
+  }
+
+  if (extension === "webm") {
+    return buffer.length >= 4 && buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  }
+
+  if (extension === "mp4" || extension === "mov") {
+    if (buffer.length < 12 || buffer.toString("ascii", 4, 8) !== "ftyp") return false;
+    const brands = [buffer.toString("ascii", 8, 12)];
+    for (let offset = 16; offset + 4 <= Math.min(buffer.length, 64); offset += 4) {
+      brands.push(buffer.toString("ascii", offset, offset + 4));
+    }
+    return extension === "mov" ? brands.includes("qt  ") || brands.some((brand) => brand.startsWith("qt")) : !brands.includes("qt  ");
+  }
+
+  return false;
+}
+
+/** Uploads a single file and returns metadata to persist. */
 export async function uploadMedia(
   file: File,
   options: { folder?: string; kind: "image" | "video" }
 ): Promise<UploadedMedia> {
-  validateFile(file, options.kind);
-
-  const folder = options.folder ?? process.env.CLOUDINARY_FOLDER ?? "aurena-nails";
+  const { extension } = validateFile(file, options.kind);
+  const folder = sanitizeUploadFolder(options.folder ?? process.env.CLOUDINARY_FOLDER ?? "aurena-nails");
   const buffer = Buffer.from(await file.arrayBuffer());
+
+  if (!hasExpectedSignature(buffer, options.kind, extension)) {
+    throw new MediaError("The file contents do not match its declared image or video type.", "INVALID_CONTENT");
+  }
 
   if (storageKind() === "cloudinary") {
     return uploadToCloudinary(buffer, file, { folder, kind: options.kind });
   }
-  return uploadToLocalDisk(buffer, file, { folder, kind: options.kind });
+  return uploadToLocalDisk(buffer, file, { folder, kind: options.kind, extension });
 }
 
 async function uploadToCloudinary(
@@ -162,43 +210,44 @@ async function uploadToCloudinary(
 
 /**
  * Local fallback: writes into `public/uploads/<folder>` and returns a public
- * `/uploads/...` path. Used for development and for the offline preview
- * environment, where Cloudinary credentials are intentionally absent.
+ * `/uploads/...` path. It is deliberately disabled for production deployments.
  */
 async function uploadToLocalDisk(
   buffer: Buffer,
   file: File,
-  options: { folder: string; kind: "image" | "video" }
+  options: { folder: string; kind: "image" | "video"; extension: string }
 ): Promise<UploadedMedia> {
   const { mkdir, writeFile, readFile } = await import("node:fs/promises");
   const path = await import("node:path");
   const crypto = await import("node:crypto");
 
-  const safeFolder = options.folder.replace(/[^a-zA-Z0-9/_-]/g, "").replace(/^\/+/, "") || "uploads";
-  const dir = path.join(process.cwd(), "public", "uploads", safeFolder);
+  const baseDirectory = path.resolve(process.cwd(), "public", "uploads");
+  const dir = path.resolve(baseDirectory, options.folder);
+  if (!dir.startsWith(`${baseDirectory}${path.sep}`)) {
+    throw new MediaError("The upload destination is invalid.", "INVALID_FOLDER");
+  }
   await mkdir(dir, { recursive: true });
 
-  const extension = (file.name.split(".").pop() || (options.kind === "image" ? "jpg" : "mp4")).toLowerCase();
   const base = path
-    .basename(file.name, `.${extension}`)
+    .basename(file.name, `.${options.extension}`)
     .replace(/[^a-zA-Z0-9-_]/g, "-")
     .slice(0, 40)
     .toLowerCase();
-  const filename = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${base || "file"}.${extension}`;
+  const filename = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${base || "file"}.${options.extension}`;
 
-  await writeFile(path.join(dir, filename), buffer);
+  await writeFile(path.join(dir, filename), buffer, { flag: "wx" });
 
-  const dimensions = await readImageDimensions(buffer, extension);
-  const publicPath = `/uploads/${safeFolder}/${filename}`;
+  const dimensions = await readImageDimensions(buffer, options.extension);
+  const publicPath = `/uploads/${options.folder}/${filename}`;
 
   // Fail loudly if a write silently produced nothing.
   await readFile(path.join(dir, filename));
 
   return {
     url: publicPath,
-    publicId: `local:${safeFolder}/${filename}`,
+    publicId: `local:${options.folder}/${filename}`,
     resourceType: options.kind,
-    format: extension,
+    format: options.extension,
     bytes: buffer.byteLength,
     width: dimensions?.width ?? null,
     height: dimensions?.height ?? null,
@@ -245,7 +294,7 @@ async function readImageDimensions(buffer: Buffer, extension: string) {
   return null;
 }
 
-/** Deletes a previously uploaded asset. Never throws — cleanup is best effort. */
+/** Deletes an asset on a best-effort basis. Never exposes provider errors. */
 export async function deleteMedia(publicId: string | null | undefined, resourceType: "image" | "video" = "image") {
   if (!publicId) return;
 
@@ -253,15 +302,21 @@ export async function deleteMedia(publicId: string | null | undefined, resourceT
     if (publicId.startsWith("local:")) {
       const { unlink } = await import("node:fs/promises");
       const path = await import("node:path");
-      const relative = publicId.replace(/^local:/, "").replace(/^\/+/, "");
-      await unlink(path.join(process.cwd(), "public", "uploads", relative)).catch(() => {});
+      const baseDirectory = path.resolve(process.cwd(), "public", "uploads");
+      const relative = publicId.slice("local:".length).replace(/\\/g, "/");
+      const target = path.resolve(baseDirectory, relative);
+      if (!target.startsWith(`${baseDirectory}${path.sep}`)) {
+        console.warn("[media] refused to delete a local file outside the upload directory");
+        return;
+      }
+      await unlink(target).catch(() => {});
       return;
     }
 
-    if (storageKind() === "cloudinary") {
+    if (isCloudinaryConfigured()) {
       await cloudinaryClient().uploader.destroy(publicId, { resource_type: resourceType });
     }
   } catch (error) {
-    console.error("[media] failed to delete asset", publicId, error);
+    console.error("[media] failed to delete asset", error);
   }
 }

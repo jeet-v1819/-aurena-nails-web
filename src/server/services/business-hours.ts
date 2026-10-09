@@ -4,6 +4,7 @@
  */
 import "server-only";
 import { cache } from "react";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { DAY_NAMES } from "@/lib/constants";
 import { toDateOnly } from "@/lib/utils";
@@ -36,9 +37,9 @@ const DEFAULT_HOURS: BusinessHour[] = DAY_NAMES.map((dayName, dayOfWeek) => ({
 }));
 
 /** All seven days, always in Sunday→Saturday order. */
-export const getBusinessHours = cache(async (): Promise<BusinessHour[]> => {
+export const getBusinessHours = cache(async (db: Prisma.TransactionClient = prisma): Promise<BusinessHour[]> => {
   try {
-    const rows = await prisma.businessHours.findMany({ orderBy: { dayOfWeek: "asc" } });
+    const rows = await db.businessHours.findMany({ orderBy: { dayOfWeek: "asc" } });
     if (!rows.length) return DEFAULT_HOURS;
 
     const byDay = new Map(rows.map((row) => [row.dayOfWeek, row]));

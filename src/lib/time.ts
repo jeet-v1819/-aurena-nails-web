@@ -44,8 +44,13 @@ export function dateOnlyFromString(value: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
   if (!match) return null;
   const [, year, month, day] = match;
-  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-  if (date.getUTCMonth() !== Number(month) - 1 || date.getUTCDate() !== Number(day)) return null;
+  const date = new Date(0);
+  date.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  if (
+    date.getUTCFullYear() !== Number(year) ||
+    date.getUTCMonth() !== Number(month) - 1 ||
+    date.getUTCDate() !== Number(day)
+  ) return null;
   return date;
 }
 
@@ -65,4 +70,36 @@ export function dayOfWeekFor(date: Date, timeZone: string = STUDIO_TIMEZONE) {
 export function todayDateOnly(): Date {
   const { date } = zonedNow();
   return dateOnlyFromString(date)!;
+}
+
+/** Converts a studio-local calendar date and minutes-from-midnight to an instant. */
+export function studioDateTimeToDate(
+  date: Date | string,
+  minutesOfDay: number,
+  timeZone: string = STUDIO_TIMEZONE
+): Date | null {
+  const dateKey = typeof date === "string" ? date : date.toISOString().slice(0, 10);
+  const dateOnly = dateOnlyFromString(dateKey);
+  if (!dateOnly || !Number.isInteger(minutesOfDay) || minutesOfDay < 0 || minutesOfDay >= 24 * 60) return null;
+
+  const year = dateOnly.getUTCFullYear();
+  const month = dateOnly.getUTCMonth();
+  const day = dateOnly.getUTCDate();
+  const desiredLocalAsUtc = Date.UTC(year, month, day, Math.floor(minutesOfDay / 60), minutesOfDay % 60);
+  let timestamp = desiredLocalAsUtc;
+
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const local = partsFor(new Date(timestamp), timeZone);
+      const [localYear, localMonth, localDay] = local.date.split("-").map(Number);
+      const actualLocalAsUtc = Date.UTC(localYear, localMonth - 1, localDay, local.hours, local.minutes);
+      const difference = desiredLocalAsUtc - actualLocalAsUtc;
+      if (difference === 0) return new Date(timestamp);
+      timestamp += difference;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }

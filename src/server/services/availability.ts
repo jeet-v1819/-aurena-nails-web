@@ -2,8 +2,9 @@
  * Availability engine.
  *
  * Single source of truth for "can this service be booked at this time?".
- * Every booking rule the studio configures is enforced here — and again by the
- * database's partial unique index when two requests race.
+ * Every booking rule the studio configures is enforced here. Booking writes
+ * recheck under a transaction-scoped per-date lock, with database constraints
+ * as a final guard against overlapping active intervals.
  *
  * Rules applied, in order:
  *   1. the date must not be in the past
@@ -17,6 +18,7 @@
  *      including the clean-up buffer between clients
  */
 import "server-only";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { formatMinutes } from "@/lib/format";
 import { addDays, dateOnlyFromString, todayDateOnly, zonedNow } from "@/lib/time";
@@ -87,19 +89,22 @@ export async function getAvailabilityRange(input: {
   days?: number;
   /** Exclude this appointment from the busy list (used when rescheduling). */
   ignoreAppointmentId?: string;
+  /** Use the caller's transaction so bookings recheck slots under the date lock. */
+  db?: Prisma.TransactionClient;
 }): Promise<DayAvailability[]> {
+  const db = input.db ?? prisma;
   const days = Math.min(Math.max(input.days ?? 1, 1), 120);
   const from = input.fromDate ?? todayDateOnly();
   const to = addDays(from, days - 1);
 
   const [hours, settings, holidays, appointments] = await Promise.all([
-    getBusinessHours(),
-    getBookingSettings(),
-    prisma.holiday.findMany({
+    getBusinessHours(db),
+    getBookingSettings(db),
+    db.holiday.findMany({
       where: { isActive: true, date: { gte: from, lte: to } },
       select: { date: true, name: true },
     }),
-    prisma.appointment.findMany({
+    db.appointment.findMany({
       where: {
         date: { gte: from, lte: to },
         status: { in: ["PENDING", "CONFIRMED"] },
@@ -118,7 +123,9 @@ export async function getAvailabilityRange(input: {
     busyByDate.set(key, list);
   }
 
-  const { date: todayString, minutesOfDay: nowMinutes } = zonedNow();
+  const now = new Date();
+  const { date: todayString, minutesOfDay: nowMinutes } = zonedNow(now);
+  const firstFutureMinute = nowMinutes + (now.getSeconds() > 0 ? 1 : 0);
   const today = dateOnlyFromString(todayString)!;
   const lastBookable = addDays(today, settings.maxAdvanceDays);
 
@@ -163,7 +170,7 @@ export async function getAvailabilityRange(input: {
     const slots: SlotAvailability[] = [];
 
     // Nothing today can start before now + the configured notice period.
-    const earliestStart = dateKey === todayString ? nowMinutes + settings.minLeadMinutes : -1;
+    const earliestStart = dateKey === todayString ? firstFutureMinute + settings.minLeadMinutes : -1;
 
     for (
       let start = dayHours.openMinutes;
@@ -239,6 +246,7 @@ export async function getDayAvailability(input: {
   date: string | Date;
   durationMinutes: number;
   ignoreAppointmentId?: string;
+  db?: Prisma.TransactionClient;
 }): Promise<DayAvailability | null> {
   const date = typeof input.date === "string" ? dateOnlyFromString(input.date) : input.date;
   if (!date) return null;
@@ -248,6 +256,7 @@ export async function getDayAvailability(input: {
     fromDate: date,
     days: 1,
     ignoreAppointmentId: input.ignoreAppointmentId,
+    db: input.db,
   });
 
   return day ?? null;
@@ -262,11 +271,13 @@ export async function checkSlotBookable(input: {
   startMinutes: number;
   durationMinutes: number;
   ignoreAppointmentId?: string;
+  db?: Prisma.TransactionClient;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   const day = await getDayAvailability({
     date: input.date,
     durationMinutes: input.durationMinutes,
     ignoreAppointmentId: input.ignoreAppointmentId,
+    db: input.db,
   });
 
   if (!day) return { ok: false, error: "That date could not be understood. Please pick another." };
