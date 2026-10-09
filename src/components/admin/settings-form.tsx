@@ -21,6 +21,7 @@ export type SettingsValues = {
   minLeadMinutes: number;
   maxAdvanceDays: number;
   cancellationWindowHours: number;
+  bufferMinutes: number;
 };
 
 export function SettingsForm({ initial }: { initial: SettingsValues }) {
@@ -192,6 +193,23 @@ export function SettingsForm({ initial }: { initial: SettingsValues }) {
                 className="input"
                 value={form.cancellationWindowHours}
                 onChange={(event) => setForm({ ...form, cancellationWindowHours: Number(event.target.value) })}
+              />
+            </Field>
+            <Field
+              label="Booking buffer (minutes)"
+              htmlFor="bufferMinutes"
+              required
+              hint="Minimum clean-up time between active appointments. Use 0 for no buffer."
+              error={errors.bufferMinutes?.[0]}
+            >
+              <input
+                id="bufferMinutes"
+                type="number"
+                min={0}
+                max={240}
+                className="input"
+                value={form.bufferMinutes}
+                onChange={(event) => setForm({ ...form, bufferMinutes: Number(event.target.value) })}
               />
             </Field>
           </FieldGrid>

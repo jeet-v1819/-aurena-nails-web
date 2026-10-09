@@ -12,6 +12,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test:regression": "tsx --test tests/regression.test.ts",
     "postinstall": "node scripts/prisma-generate.mjs",
     "db:generate": "node scripts/prisma-generate.mjs",
     "db:migrate": "prisma migrate dev",

@@ -7,6 +7,7 @@ import { getSiteContent } from "@/server/services/content";
 import { VideoCard } from "@/components/site/cards";
 import { Badge, SectionHeading } from "@/components/ui/primitives";
 import { formatDate, formatSeconds } from "@/lib/format";
+import { serializeJsonLd } from "@/lib/seo";
 
 type PageProps = { params: Promise<{ id: string }> };
 
@@ -50,7 +51,7 @@ export default async function VideoDetailPage({ params }: PageProps) {
 
   return (
     <>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }} />
 
       <section className="section pb-10 pt-10">
         <div className="container-page">

@@ -5,7 +5,7 @@
  * public contact form.
  */
 import { revalidatePath } from "next/cache";
-import { getCurrentUser } from "@/lib/auth/session";
+import { destroySession, getCurrentUser } from "@/lib/auth/session";
 import { actionFailure, actionSuccess, toActionFailure, type ActionResult } from "@/lib/errors";
 import { normalizeInput, validate } from "@/lib/validation";
 import { changePasswordSchema, contactSchema, profileSchema, reviewSchema, wishlistItemSchema } from "@/validators/customer";
@@ -31,8 +31,8 @@ export async function updateProfileAction(
       firstName: parsed.data.firstName,
       lastName: parsed.data.lastName,
       mobile: parsed.data.mobile,
-      avatarUrl: parsed.data.avatarUrl || undefined,
-      avatarPublicId: parsed.data.avatarPublicId || undefined,
+      avatarUrl: parsed.data.avatarUrl,
+      avatarPublicId: parsed.data.avatarPublicId,
     });
 
     if (!result.ok) return actionFailure(result.error, { fieldErrors: result.fieldErrors });
@@ -46,7 +46,7 @@ export async function updateProfileAction(
 
 export async function changePasswordAction(
   source: FormData | Record<string, unknown>
-): Promise<ActionResult> {
+): Promise<ActionResult<{ redirectTo: string }>> {
   try {
     const user = await getCurrentUser();
     if (!user) return actionFailure("Your session expired. Please sign in again.", { code: "AUTH_REQUIRED" });
@@ -57,7 +57,8 @@ export async function changePasswordAction(
     const result = await changePassword(user.id, parsed.data.currentPassword, parsed.data.password);
     if (!result.ok) return actionFailure(result.error, { fieldErrors: result.fieldErrors });
 
-    return actionSuccess("Your password has been changed.");
+    await destroySession();
+    return actionSuccess("Your password has been changed. Please sign in again.", { redirectTo: "/login?passwordChanged=1" });
   } catch (error) {
     return toActionFailure(error, "We could not change your password. Please try again.");
   }

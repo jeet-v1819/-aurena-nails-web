@@ -52,7 +52,7 @@ export function toActionFailure(error: unknown, fallback = GENERIC_ERROR): Actio
         mobile: "This mobile number is already registered.",
         slug: "A record with this URL slug already exists.",
         reference: "That booking reference already exists.",
-        Appointment_active_slot_key: "That time slot was just booked by someone else. Please pick another.",
+        Appointment_active_slot_key: "That time slot was just taken. Please choose another time.",
         date: "A holiday already exists on that date.",
         dayOfWeek: "Opening hours for that day already exist.",
         key: "That content key already exists.",
@@ -78,6 +78,14 @@ export function toActionFailure(error: unknown, fallback = GENERIC_ERROR): Actio
         code: "FOREIGN_KEY",
       };
     }
+
+    if (error.code === "P2004") {
+      return {
+        ok: false,
+        error: "The change conflicts with an existing record or database rule. Please review the values and try again.",
+        code: "CONSTRAINT",
+      };
+    }
   }
 
   if (error instanceof Prisma.PrismaClientInitializationError) {
@@ -86,6 +94,10 @@ export function toActionFailure(error: unknown, fallback = GENERIC_ERROR): Actio
 
   if (error instanceof Prisma.PrismaClientValidationError) {
     return { ok: false, error: "Some of the submitted values were invalid. Please check the form.", code: "VALIDATION" };
+  }
+
+  if (error instanceof AppError) {
+    return { ok: false, error: error.message, code: error.code };
   }
 
   console.error("[aurena] unhandled error:", error);

@@ -23,7 +23,7 @@ import {
 import { createVideo, deleteVideo, setVideoFlags, updateVideo } from "@/server/services/videos";
 import { updateBusinessHours, createHoliday, updateHoliday, deleteHoliday } from "@/server/services/business-hours";
 import { updateContent } from "@/server/services/content";
-import { deleteMedia } from "@/lib/media/storage";
+import { recordAudit } from "@/server/services/audit";
 
 async function requireAdminOrFail() {
   const admin = await getAdminOrNull();
@@ -254,12 +254,7 @@ export async function deleteVideoAction(source: Record<string, unknown>): Promis
     const videoId = String(source.videoId ?? "");
     if (!videoId) return actionFailure("Missing video.");
 
-    const video = await import("@/lib/db/prisma").then(({ prisma }) =>
-      prisma.video.findUnique({ where: { id: videoId }, select: { thumbnailPublicId: true } })
-    );
-
     await deleteVideo(guard.admin.id, videoId);
-    if (video?.thumbnailPublicId) await deleteMedia(video.thumbnailPublicId, "image");
 
     revalidatePath("/admin/videos");
     revalidatePath("/videos");
@@ -281,6 +276,12 @@ export async function updateContentAction(source: Record<string, unknown>): Prom
     if (!parsed.success) return parsed.failure;
 
     await updateContent(parsed.data);
+    await recordAudit({
+      actorId: guard.admin.id,
+      action: "content.update",
+      entity: "WebsiteContent",
+      changes: { keys: Object.keys(parsed.data) },
+    });
 
     revalidatePath("/", "layout");
     revalidatePath("/admin/content");
@@ -308,6 +309,13 @@ export async function updateSettingsAction(source: Record<string, unknown>): Pro
       "booking.minLeadMinutes": String(parsed.data.minLeadMinutes),
       "booking.maxAdvanceDays": String(parsed.data.maxAdvanceDays),
       "booking.cancellationWindowHours": String(parsed.data.cancellationWindowHours),
+      "booking.bufferMinutes": String(parsed.data.bufferMinutes),
+    });
+    await recordAudit({
+      actorId: guard.admin.id,
+      action: "settings.update",
+      entity: "WebsiteContent",
+      changes: parsed.data,
     });
 
     revalidatePath("/", "layout");
@@ -329,17 +337,16 @@ export async function updateBusinessHoursAction(source: {
 
     const normalized = (source.days ?? []).map((day) => {
       const openMinutes =
-        typeof day.openMinutes === "number" ? day.openMinutes : timeStringToMinutes(String(day.openTime ?? "")) ?? 600;
+        typeof day.openMinutes === "number" ? day.openMinutes : timeStringToMinutes(String(day.openTime ?? "")) ?? Number.NaN;
       const closeMinutes =
-        typeof day.closeMinutes === "number" ? day.closeMinutes : timeStringToMinutes(String(day.closeTime ?? "")) ?? 1140;
-      const breakStart =
-        day.breakStartTime && String(day.breakStartTime)
-          ? timeStringToMinutes(String(day.breakStartTime)) ?? undefined
-          : undefined;
-      const breakEnd =
-        day.breakEndTime && String(day.breakEndTime)
-          ? timeStringToMinutes(String(day.breakEndTime)) ?? undefined
-          : undefined;
+        typeof day.closeMinutes === "number" ? day.closeMinutes : timeStringToMinutes(String(day.closeTime ?? "")) ?? Number.NaN;
+      const parseOptionalTime = (value: unknown) => {
+        if (typeof value === "number") return value;
+        const time = String(value ?? "").trim();
+        return time ? timeStringToMinutes(time) ?? Number.NaN : undefined;
+      };
+      const breakStart = parseOptionalTime(day.breakStartTime ?? day.breakStartMinutes);
+      const breakEnd = parseOptionalTime(day.breakEndTime ?? day.breakEndMinutes);
 
       return {
         dayOfWeek: Number(day.dayOfWeek),

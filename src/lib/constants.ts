@@ -61,6 +61,26 @@ export const ADMIN_PAGE_SIZE = 15;
 /** Media rules (mirrored by the upload API so the client cannot bypass them). */
 export const IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"] as const;
 export const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"] as const;
+
+const MEDIA_TYPES_BY_EXTENSION: Record<string, { kind: "image" | "video"; mimeTypes: readonly string[] }> = {
+  jpg: { kind: "image", mimeTypes: ["image/jpeg", "image/jpg"] },
+  jpeg: { kind: "image", mimeTypes: ["image/jpeg", "image/jpg"] },
+  png: { kind: "image", mimeTypes: ["image/png"] },
+  webp: { kind: "image", mimeTypes: ["image/webp"] },
+  mp4: { kind: "video", mimeTypes: ["video/mp4"] },
+  webm: { kind: "video", mimeTypes: ["video/webm"] },
+  mov: { kind: "video", mimeTypes: ["video/quicktime"] },
+};
+
+/** The file extension and declared MIME type must both be allowed and agree. */
+export function isAllowedMediaType(fileName: string, mimeType: string, kind: "image" | "video") {
+  const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
+  const mediaType = MEDIA_TYPES_BY_EXTENSION[extension];
+  if (!mediaType || mediaType.kind !== kind) return false;
+  const mime = mimeType.toLowerCase();
+  return !mime || mediaType.mimeTypes.includes(mime);
+}
+
 export const IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8 MB
 export const VIDEO_MAX_BYTES = 60 * 1024 * 1024; // 60 MB
 export const MAX_IMAGE_COUNT_PER_UPLOAD = 12;
@@ -70,6 +90,7 @@ export const DEFAULT_SLOT_INTERVAL_MINUTES = 30;
 export const DEFAULT_MIN_LEAD_MINUTES = 120; // must book at least 2h ahead
 export const DEFAULT_MAX_ADVANCE_DAYS = 90;
 export const DEFAULT_CANCELLATION_WINDOW_HOURS = 12;
+export const DEFAULT_BUFFER_MINUTES = 15;
 
 /** Service facets used by the filters and the admin forms. */
 export const NAIL_TYPES = ["Natural", "Gel", "Acrylic", "Builder Gel", "Polygel", "Press-on"] as const;

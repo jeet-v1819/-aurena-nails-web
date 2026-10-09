@@ -5,18 +5,25 @@
  * the header keeps working even before JavaScript loads.
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { SESSION_COOKIE } from "@/lib/auth/session";
+import { SESSION_COOKIE } from "@/lib/auth/config";
 
-export async function POST(request: NextRequest) {
+function redirectAfterLogout(request: NextRequest) {
   const target = new URL("/login?loggedOut=1", request.nextUrl.origin);
   const response = NextResponse.redirect(target, { status: 303 });
-  response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
+  response.cookies.set(SESSION_COOKIE, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 0,
+  });
   return response;
 }
 
+export async function POST(request: NextRequest) {
+  return redirectAfterLogout(request);
+}
+
 export async function GET(request: NextRequest) {
-  const target = new URL("/login?loggedOut=1", request.nextUrl.origin);
-  const response = NextResponse.redirect(target, { status: 303 });
-  response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
-  return response;
+  return redirectAfterLogout(request);
 }

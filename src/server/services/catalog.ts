@@ -8,8 +8,10 @@ import "server-only";
 import { cache } from "react";
 import type { CategoryType, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+import { deleteMedia } from "@/lib/media/storage";
 import { slugify } from "@/lib/format";
 import { recordAudit } from "./audit";
+import { AppError } from "@/lib/errors";
 import type { ServiceInput } from "@/validators/admin";
 
 /* -------------------------------------------------------------- DTO mapping */
@@ -181,6 +183,19 @@ export async function updateCategory(
   }
 ) {
   const type = input.type as CategoryType;
+  const existing = await prisma.category.findUnique({
+    where: { id: categoryId },
+    select: {
+      type: true,
+      imagePublicId: true,
+      _count: { select: { services: true, galleryImages: true, videos: true } },
+    },
+  });
+  if (!existing) throw new AppError("Category not found.", "NOT_FOUND");
+  const inUse = existing._count.services + existing._count.galleryImages + existing._count.videos;
+  if (existing.type !== type && inUse > 0) {
+    throw new AppError("A category in use cannot be moved to another catalogue type. Move its items first.", "CATEGORY_IN_USE");
+  }
   const slug = await uniqueCategorySlug(type, input.slug || slugify(input.name), categoryId);
 
   const category = await prisma.category.update({
@@ -197,6 +212,10 @@ export async function updateCategory(
     },
   });
 
+  if (existing.imagePublicId && existing.imagePublicId !== (input.imagePublicId || null)) {
+    await deleteMedia(existing.imagePublicId, "image");
+  }
+
   await recordAudit({ actorId: adminId, action: "category.update", entity: "Category", entityId: categoryId });
   return category;
 }
@@ -204,7 +223,10 @@ export async function updateCategory(
 export async function deleteCategory(adminId: string, categoryId: string) {
   const counts = await prisma.category.findUnique({
     where: { id: categoryId },
-    select: { _count: { select: { services: true, galleryImages: true, videos: true } } },
+    select: {
+      imagePublicId: true,
+      _count: { select: { services: true, galleryImages: true, videos: true } },
+    },
   });
 
   const inUse =
@@ -218,6 +240,7 @@ export async function deleteCategory(adminId: string, categoryId: string) {
   }
 
   await prisma.category.delete({ where: { id: categoryId } });
+  if (counts?.imagePublicId) await deleteMedia(counts.imagePublicId, "image");
   await recordAudit({ actorId: adminId, action: "category.delete", entity: "Category", entityId: categoryId });
   return { ok: true as const };
 }
@@ -250,7 +273,7 @@ function serviceWhere(filters: ServiceFilters): Prisma.ServiceWhereInput {
     ...(filters.includeInactive ? {} : { isActive: true }),
     ...(filters.availableOnly ? { isAvailable: true } : {}),
     ...(filters.featured ? { isFeatured: true } : {}),
-    ...(filters.categorySlug ? { category: { slug: filters.categorySlug } } : {}),
+    category: { type: "SERVICE", ...(filters.categorySlug ? { slug: filters.categorySlug } : {}) },
     ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
     ...(filters.style ? { style: filters.style } : {}),
     ...(filters.occasion ? { occasion: filters.occasion } : {}),
@@ -316,7 +339,7 @@ export async function listServices(filters: ServiceFilters = {}) {
 
 export async function listFeaturedServices(take = 6) {
   const rows = await prisma.service.findMany({
-    where: { isActive: true, deletedAt: null },
+    where: { isActive: true, deletedAt: null, category: { type: "SERVICE" } },
     include: serviceInclude,
     orderBy: [{ isFeatured: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
     take,
@@ -326,7 +349,7 @@ export async function listFeaturedServices(take = 6) {
 
 export const getServiceBySlug = cache(async (slug: string) => {
   const service = await prisma.service.findFirst({
-    where: { slug, deletedAt: null },
+    where: { slug, isActive: true, deletedAt: null, category: { type: "SERVICE" } },
     include: serviceInclude,
   });
   if (!service) return null;
@@ -349,6 +372,7 @@ export async function getRelatedServices(service: ServiceDTO, take = 3) {
     where: {
       isActive: true,
       deletedAt: null,
+      category: { type: "SERVICE" },
       id: { not: service.id },
       OR: [{ categoryId: service.categoryId }, { style: service.style ?? undefined }],
     },
@@ -362,7 +386,7 @@ export async function getRelatedServices(service: ServiceDTO, take = 3) {
 /** Bookable services for the booking wizard (id + name + duration). */
 export async function listBookableServices() {
   return prisma.service.findMany({
-    where: { isActive: true, isAvailable: true, deletedAt: null },
+    where: { isActive: true, isAvailable: true, deletedAt: null, category: { type: "SERVICE" } },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     select: {
       id: true,
@@ -418,7 +442,16 @@ function serviceDataFromInput(input: ServiceInput, slug: string): Prisma.Service
   };
 }
 
+async function requireServiceCategory(categoryId: string) {
+  const category = await prisma.category.findFirst({
+    where: { id: categoryId, type: "SERVICE" },
+    select: { id: true },
+  });
+  if (!category) throw new AppError("Choose a valid service category.", "VALIDATION");
+}
+
 export async function createService(adminId: string, input: ServiceInput) {
+  await requireServiceCategory(input.categoryId);
   const slug = await uniqueServiceSlug(input.slug || slugify(input.name));
   const service = await prisma.service.create({ data: serviceDataFromInput(input, slug) });
   await recordAudit({ actorId: adminId, action: "service.create", entity: "Service", entityId: service.id });
@@ -426,6 +459,7 @@ export async function createService(adminId: string, input: ServiceInput) {
 }
 
 export async function updateService(adminId: string, serviceId: string, input: ServiceInput) {
+  await requireServiceCategory(input.categoryId);
   const slug = await uniqueServiceSlug(input.slug || slugify(input.name), serviceId);
   const { id, ...data } = serviceDataFromInput(input, slug);
   // The id is generated by the database; it is destructured away so it is never
@@ -472,7 +506,19 @@ export async function deleteService(adminId: string, serviceId: string) {
     };
   }
 
+  const media = await prisma.service.findUnique({
+    where: { id: serviceId },
+    select: {
+      images: { select: { publicId: true } },
+      videos: { select: { publicId: true, thumbnailPublicId: true } },
+    },
+  });
+
   await prisma.service.delete({ where: { id: serviceId } });
+  await Promise.all([
+    ...(media?.images.map((image) => deleteMedia(image.publicId, "image")) ?? []),
+    ...(media?.videos.flatMap((video) => [deleteMedia(video.publicId, "video"), deleteMedia(video.thumbnailPublicId, "image")]) ?? []),
+  ]);
   await recordAudit({ actorId: adminId, action: "service.delete", entity: "Service", entityId: serviceId });
   return { ok: true as const, archived: false, message: "Service deleted." };
 }

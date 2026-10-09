@@ -4,6 +4,7 @@
  * suggestions use the lighter /api/search endpoint).
  */
 import "server-only";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 
 export type SearchGroup<T> = { total: number; items: T[] };
@@ -26,8 +27,9 @@ export type GlobalSearchResults = {
   total: number;
 };
 
-export async function searchEverything(rawQuery: string, take = 12): Promise<GlobalSearchResults> {
-  const query = rawQuery.trim();
+export async function searchEverything(rawQuery: string, requestedTake = 12): Promise<GlobalSearchResults> {
+  const query = rawQuery.trim().slice(0, 100);
+  const take = Math.min(Math.max(1, Math.floor(requestedTake) || 12), 50);
 
   if (query.length < 2) {
     return {
@@ -39,21 +41,48 @@ export async function searchEverything(rawQuery: string, take = 12): Promise<Glo
     };
   }
 
+  const serviceWhere: Prisma.ServiceWhereInput = {
+    isActive: true,
+    deletedAt: null,
+    category: { type: "SERVICE" },
+    OR: [
+      { name: { contains: query, mode: "insensitive" } },
+      { shortDescription: { contains: query, mode: "insensitive" } },
+      { description: { contains: query, mode: "insensitive" } },
+      { style: { contains: query, mode: "insensitive" } },
+      { occasion: { contains: query, mode: "insensitive" } },
+      { nailType: { contains: query, mode: "insensitive" } },
+      { category: { name: { contains: query, mode: "insensitive" } } },
+    ],
+  };
+  const galleryWhere: Prisma.GalleryImageWhereInput = {
+    isActive: true,
+    deletedAt: null,
+    category: { type: "GALLERY" },
+    OR: [
+      { title: { contains: query, mode: "insensitive" } },
+      { description: { contains: query, mode: "insensitive" } },
+      { tags: { has: query } },
+      { style: { contains: query, mode: "insensitive" } },
+      { occasion: { contains: query, mode: "insensitive" } },
+      { category: { name: { contains: query, mode: "insensitive" } } },
+    ],
+  };
+  const videoWhere: Prisma.VideoWhereInput = {
+    isActive: true,
+    deletedAt: null,
+    category: { type: "VIDEO" },
+    OR: [
+      { title: { contains: query, mode: "insensitive" } },
+      { description: { contains: query, mode: "insensitive" } },
+      { tags: { has: query } },
+      { category: { name: { contains: query, mode: "insensitive" } } },
+    ],
+  };
+
   const [services, serviceCount, gallery, galleryCount, videos, videoCount] = await Promise.all([
     prisma.service.findMany({
-      where: {
-        isActive: true,
-        deletedAt: null,
-        OR: [
-          { name: { contains: query, mode: "insensitive" } },
-          { shortDescription: { contains: query, mode: "insensitive" } },
-          { description: { contains: query, mode: "insensitive" } },
-          { style: { contains: query, mode: "insensitive" } },
-          { occasion: { contains: query, mode: "insensitive" } },
-          { nailType: { contains: query, mode: "insensitive" } },
-          { category: { name: { contains: query, mode: "insensitive" } } },
-        ],
-      },
+      where: serviceWhere,
       orderBy: [{ isFeatured: "desc" }, { ratingAverage: "desc" }],
       take,
       select: {
@@ -68,71 +97,21 @@ export async function searchEverything(rawQuery: string, take = 12): Promise<Glo
         images: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }], take: 1, select: { url: true } },
       },
     }),
-    prisma.service.count({
-      where: {
-        isActive: true,
-        deletedAt: null,
-        OR: [
-          { name: { contains: query, mode: "insensitive" } },
-          { shortDescription: { contains: query, mode: "insensitive" } },
-          { category: { name: { contains: query, mode: "insensitive" } } },
-        ],
-      },
-    }),
+    prisma.service.count({ where: serviceWhere }),
     prisma.galleryImage.findMany({
-      where: {
-        isActive: true,
-        deletedAt: null,
-        OR: [
-          { title: { contains: query, mode: "insensitive" } },
-          { description: { contains: query, mode: "insensitive" } },
-          { tags: { has: query } },
-          { style: { contains: query, mode: "insensitive" } },
-          { occasion: { contains: query, mode: "insensitive" } },
-          { category: { name: { contains: query, mode: "insensitive" } } },
-        ],
-      },
+      where: galleryWhere,
       orderBy: [{ isFeatured: "desc" }, { createdAt: "desc" }],
       take,
       select: { id: true, title: true, url: true, tags: true, category: { select: { name: true } } },
     }),
-    prisma.galleryImage.count({
-      where: {
-        isActive: true,
-        deletedAt: null,
-        OR: [
-          { title: { contains: query, mode: "insensitive" } },
-          { tags: { has: query } },
-          { category: { name: { contains: query, mode: "insensitive" } } },
-        ],
-      },
-    }),
+    prisma.galleryImage.count({ where: galleryWhere }),
     prisma.video.findMany({
-      where: {
-        isActive: true,
-        deletedAt: null,
-        OR: [
-          { title: { contains: query, mode: "insensitive" } },
-          { description: { contains: query, mode: "insensitive" } },
-          { tags: { has: query } },
-          { category: { name: { contains: query, mode: "insensitive" } } },
-        ],
-      },
+      where: videoWhere,
       orderBy: [{ isFeatured: "desc" }, { publishedAt: "desc" }],
       take,
       select: { id: true, title: true, thumbnailUrl: true, viewCount: true, category: { select: { name: true } } },
     }),
-    prisma.video.count({
-      where: {
-        isActive: true,
-        deletedAt: null,
-        OR: [
-          { title: { contains: query, mode: "insensitive" } },
-          { tags: { has: query } },
-          { category: { name: { contains: query, mode: "insensitive" } } },
-        ],
-      },
-    }),
+    prisma.video.count({ where: videoWhere }),
   ]);
 
   return {

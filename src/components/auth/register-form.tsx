@@ -8,7 +8,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2, UserPlus } from "lucide-react";
 import { registerAction } from "@/server/actions/auth";
@@ -27,7 +27,7 @@ export function RegisterForm() {
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     setError,
     formState: { errors, isSubmitting },
   } = useForm<RegisterValues>({
@@ -43,7 +43,7 @@ export function RegisterForm() {
     },
   });
 
-  const password = watch("password") ?? "";
+  const password = useWatch({ control, name: "password" }) ?? "";
 
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);

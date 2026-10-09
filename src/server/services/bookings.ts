@@ -2,17 +2,16 @@
  * Appointment booking and lifecycle.
  *
  * Statuses: PENDING → CONFIRMED → COMPLETED, with CANCELLED / REJECTED as the
- * terminating states. Every transition is written to `AppointmentEvent`, and
- * the database's partial unique index guarantees that two active appointments
- * can never share a date + start time (double-booking is impossible, even under
- * a race).
+ * terminating states. Every transition is written to `AppointmentEvent`.
+ * Booking claims and reactivations serialize per date; a GiST exclusion
+ * constraint and partial unique index also guard active appointment intervals.
  */
 import "server-only";
 import { Prisma, type AppointmentStatus } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { APPOINTMENT_STATUS_LABELS } from "@/lib/constants";
 import { formatDate, formatMinutes } from "@/lib/format";
-import { dateOnlyFromString, zonedNow } from "@/lib/time";
+import { dateOnlyFromString, studioDateTimeToDate, zonedNow } from "@/lib/time";
 import { checkSlotBookable } from "./availability";
 import { getBookingSettings } from "./content";
 import { createNotification } from "./notifications";
@@ -110,6 +109,13 @@ async function generateReference() {
   return `AUR-${Date.now().toString(36).toUpperCase().slice(-6)}`;
 }
 
+/** Serialize slot claims and reactivations for one studio-local calendar day. */
+async function lockBookingDate(tx: Prisma.TransactionClient, date: Date) {
+  const dateKey = date.getUTCFullYear() * 10_000 + (date.getUTCMonth() + 1) * 100 + date.getUTCDate();
+  // Transaction-scoped advisory locks are safe with Neon’s transaction pooler.
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(1096116805, ${dateKey})`;
+}
+
 /* -------------------------------------------------------------- creation */
 
 export type BookingCreation =
@@ -118,7 +124,7 @@ export type BookingCreation =
 
 export async function createAppointment(userId: string, input: BookingInput): Promise<BookingCreation> {
   const service = await prisma.service.findFirst({
-    where: { id: input.serviceId, deletedAt: null },
+    where: { id: input.serviceId, deletedAt: null, category: { type: "SERVICE" } },
     select: { id: true, name: true, durationMinutes: true, isActive: true, isAvailable: true },
   });
 
@@ -131,22 +137,48 @@ export async function createAppointment(userId: string, input: BookingInput): Pr
   const date = dateOnlyFromString(input.date);
   if (!date) return { ok: false, error: "Please choose a valid date.", fieldErrors: { date: ["Invalid date."] } };
 
-  const slot = await checkSlotBookable({ date, startMinutes: input.startMinutes, durationMinutes: service.durationMinutes });
-  if (!slot.ok) return { ok: false, error: slot.error, fieldErrors: { startMinutes: [slot.error] } };
-
   const reference = await generateReference();
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx): Promise<
+      | { ok: true; appointment: AppointmentRow }
+      | { ok: false; error: string; fieldErrors?: Record<string, string[]> }
+    > => {
+      // All booking and reactivation paths take this lock before checking slot
+      // availability. The second read happens after any earlier claim commits.
+      await lockBookingDate(tx, date);
+
+      const currentService = await tx.service.findFirst({
+        where: { id: input.serviceId, deletedAt: null, category: { type: "SERVICE" } },
+        select: { id: true, name: true, durationMinutes: true, isActive: true, isAvailable: true },
+      });
+      if (!currentService) {
+        return { ok: false as const, error: "That service is no longer available.", fieldErrors: { serviceId: ["Service not found."] } };
+      }
+      if (!currentService.isActive) {
+        return { ok: false as const, error: "That service is no longer offered. Please choose another." };
+      }
+      if (!currentService.isAvailable) {
+        return { ok: false as const, error: "That service is temporarily unavailable. Please message the studio or choose another service." };
+      }
+
+      const slot = await checkSlotBookable({
+        date,
+        startMinutes: input.startMinutes,
+        durationMinutes: currentService.durationMinutes,
+        db: tx,
+      });
+      if (!slot.ok) return { ok: false as const, error: slot.error, fieldErrors: { startMinutes: [slot.error] } };
+
       const appointment = await tx.appointment.create({
         data: {
           reference,
           userId,
-          serviceId: service.id,
+          serviceId: currentService.id,
           date,
           startMinutes: input.startMinutes,
-          endMinutes: input.startMinutes + service.durationMinutes,
-          durationMinutes: service.durationMinutes,
+          endMinutes: input.startMinutes + currentService.durationMinutes,
+          durationMinutes: currentService.durationMinutes,
           status: "PENDING",
           customerNote: input.customerNote ? input.customerNote : null,
         },
@@ -167,7 +199,7 @@ export async function createAppointment(userId: string, input: BookingInput): Pr
           userId,
           type: "APPOINTMENT",
           title: "Appointment request received",
-          message: `${service.name} on ${formatDate(date, { weekday: "long", day: "numeric", month: "long" })} at ${formatMinutes(
+          message: `${currentService.name} on ${formatDate(date, { weekday: "long", day: "numeric", month: "long" })} at ${formatMinutes(
             input.startMinutes
           )}. We will confirm it shortly.`,
           link: "/appointments",
@@ -175,10 +207,12 @@ export async function createAppointment(userId: string, input: BookingInput): Pr
         tx
       );
 
-      return appointment;
+      return { ok: true as const, appointment };
     });
 
-    const appointment = await mapAppointment(created);
+    if (!result.ok) return result;
+
+    const appointment = await mapAppointment(result.appointment);
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
     const email = appointmentStatusEmail({
       customerName: appointment.customer.name,
@@ -193,11 +227,15 @@ export async function createAppointment(userId: string, input: BookingInput): Pr
 
     return { ok: true, appointment };
   } catch (error) {
-    // The partial unique index is the final guard against double booking.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+    // The date lock closes the application-level race; database constraints
+    // remain the final guard for overlapping or malformed active intervals.
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      (error.code === "P2002" || error.code === "P2004")
+    ) {
       return {
         ok: false,
-        error: "That time slot was just taken by another client. Please choose a different time.",
+        error: "That time slot was just taken. Please choose another time.",
         fieldErrors: { startMinutes: ["That time slot is no longer available."] },
       };
     }
@@ -296,27 +334,34 @@ export async function cancelAppointmentByCustomer(
   if (appointment.status === "COMPLETED") return { ok: false, error: "Completed appointments cannot be cancelled." };
   if (appointment.status === "REJECTED") return { ok: false, error: "This request was already declined by the studio." };
 
-  const settings = await getBookingSettings();
-  const start = new Date(appointment.date.getTime() + appointment.startMinutes * 60 * 1000);
-  const hoursUntil = (start.getTime() - Date.now()) / (60 * 60 * 1000);
+  const cancellation = await prisma.$transaction(async (tx) => {
+    const settings = await getBookingSettings(tx);
+    const startsAt = studioDateTimeToDate(appointment.date, appointment.startMinutes);
+    if (!startsAt) {
+      return { ok: false as const, error: "We could not verify the appointment time. Please contact the studio." };
+    }
+    const hoursUntil = (startsAt.getTime() - Date.now()) / (60 * 60 * 1000);
+    if (hoursUntil < settings.cancellationWindowHours) {
+      return {
+        ok: false as const,
+        error: `Appointments must be cancelled at least ${settings.cancellationWindowHours} hours in advance. Please call the studio.`,
+      };
+    }
 
-  if (hoursUntil < settings.cancellationWindowHours) {
-    return {
-      ok: false,
-      error: `Appointments must be cancelled at least ${settings.cancellationWindowHours} hours in advance. Please call the studio.`,
-    };
-  }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.appointment.update({
-      where: { id: appointmentId },
+    const now = new Date();
+    const updated = await tx.appointment.updateMany({
+      where: { id: appointmentId, userId, status: { in: ["PENDING", "CONFIRMED"] } },
       data: {
         status: "CANCELLED",
-        cancelledAt: new Date(),
+        cancelledAt: now,
         cancelledById: userId,
-        statusChangedAt: new Date(),
+        statusChangedAt: now,
       },
     });
+    if (updated.count !== 1) {
+      return { ok: false as const, error: "This appointment changed while you were working. Refresh and try again." };
+    }
+
     await tx.appointmentEvent.create({
       data: { appointmentId, status: "CANCELLED", note: reason || "Cancelled by the customer.", actorId: userId },
     });
@@ -332,9 +377,10 @@ export async function cancelAppointmentByCustomer(
       },
       tx
     );
+    return { ok: true as const };
   });
 
-  return { ok: true, message: "Your appointment has been cancelled." };
+  return cancellation.ok ? { ok: true, message: "Your appointment has been cancelled." } : cancellation;
 }
 
 /* ------------------------------------------------------------- admin views */
@@ -437,32 +483,38 @@ export async function changeAppointmentStatus(
     };
   }
 
-  // Re-activating (CONFIRMED) must not double-book the slot.
-  if (input.status === "CONFIRMED") {
-    const slot = await checkSlotBookable({
-      date: appointment.date,
-      startMinutes: appointment.startMinutes,
-      durationMinutes: appointment.durationMinutes,
-      ignoreAppointmentId: appointment.id,
-    });
-    if (!slot.ok) return { ok: false, error: slot.error };
-  }
-
   const now = new Date();
 
-  await prisma.$transaction(async (tx) => {
-    await tx.appointment.update({
-      where: { id: appointment.id },
+  const transition = await prisma.$transaction(async (tx) => {
+    // Re-activating (CONFIRMED) must serialize with new booking requests and
+    // recheck availability inside the same transaction as the status change.
+    if (input.status === "CONFIRMED") {
+      await lockBookingDate(tx, appointment.date);
+      const slot = await checkSlotBookable({
+        date: appointment.date,
+        startMinutes: appointment.startMinutes,
+        durationMinutes: appointment.durationMinutes,
+        ignoreAppointmentId: appointment.id,
+        db: tx,
+      });
+      if (!slot.ok) return { ok: false as const, error: slot.error };
+    }
+
+    const updated = await tx.appointment.updateMany({
+      where: { id: appointment.id, status: appointment.status },
       data: {
         status: input.status,
         adminNote: input.adminNote ?? appointment.adminNote,
         statusChangedAt: now,
         handledById: adminId,
-        completedAt: input.status === "COMPLETED" ? now : appointment.completedAt,
-        cancelledAt: input.status === "CANCELLED" ? now : appointment.cancelledAt,
-        cancelledById: input.status === "CANCELLED" ? adminId : appointment.cancelledById,
+        completedAt: input.status === "COMPLETED" ? now : null,
+        cancelledAt: input.status === "CANCELLED" ? now : null,
+        cancelledById: input.status === "CANCELLED" ? adminId : null,
       },
     });
+    if (updated.count !== 1) {
+      return { ok: false as const, error: "This appointment changed while you were working. Refresh and try again." };
+    }
 
     await tx.appointmentEvent.create({
       data: {
@@ -493,7 +545,9 @@ export async function changeAppointmentStatus(
       },
       tx
     );
+    return { ok: true as const };
   });
+  if (!transition.ok) return transition;
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
   const email = appointmentStatusEmail({

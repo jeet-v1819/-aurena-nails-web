@@ -13,7 +13,7 @@
  *
  * Usage
  *   node scripts/db-deploy.mjs [--reset] [--status]
- *     --reset   drop the `public` schema first, then re-apply everything
+ *     --reset   local development only: drop `public`, then re-apply migrations
  *     --status  only print which migrations are applied / pending
  */
 import crypto from "node:crypto";
@@ -40,6 +40,21 @@ if (!connectionString) {
       "  Neon:   paste your Neon connection string from https://console.neon.tech"
   );
   process.exit(1);
+}
+
+if (reset) {
+  let hostname = "";
+  try {
+    hostname = new URL(connectionString).hostname.toLowerCase();
+  } catch {
+    console.error("[db-deploy] refusing --reset because DATABASE_URL is not a valid PostgreSQL URL");
+    process.exit(1);
+  }
+  const isLoopback = hostname === "localhost" || hostname === "::1" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  if (process.env.NODE_ENV === "production" || !isLoopback) {
+    console.error("[db-deploy] refusing --reset: destructive resets are restricted to local development PostgreSQL");
+    process.exit(1);
+  }
 }
 
 /** Prisma-compatible bookkeeping so the Prisma CLI can take over at any time. */
@@ -128,12 +143,25 @@ try {
   for (const migration of pending) {
     const id = crypto.randomUUID();
     log(`applying ${migration.name} …`);
-    await client.query(
-      `INSERT INTO ${MIGRATIONS_TABLE} ("id","checksum","migration_name","started_at","applied_steps_count") VALUES ($1,$2,$3,now(),0)`,
-      [id, migration.checksum, migration.name]
-    );
+    await client.query("BEGIN");
     try {
-      await client.query("BEGIN");
+      // A transaction-scoped lock is compatible with Neon transaction pooling.
+      // Re-check after taking it so concurrent deploys never apply the same file twice.
+      await client.query("SELECT pg_advisory_xact_lock($1::integer, $2::integer)", [1096116525, 1]);
+      const alreadyApplied = await client.query(
+        `SELECT 1 FROM ${MIGRATIONS_TABLE} WHERE "migration_name" = $1 AND "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL LIMIT 1`,
+        [migration.name]
+      );
+      if (alreadyApplied.rowCount) {
+        await client.query("COMMIT");
+        log(`skipped ${migration.name} (another deploy already applied it)`);
+        continue;
+      }
+
+      await client.query(
+        `INSERT INTO ${MIGRATIONS_TABLE} ("id","checksum","migration_name","started_at","applied_steps_count") VALUES ($1,$2,$3,now(),0)`,
+        [id, migration.checksum, migration.name]
+      );
       await client.query(migration.sql);
       await client.query(
         `UPDATE ${MIGRATIONS_TABLE} SET "finished_at" = now(), "applied_steps_count" = 1 WHERE "id" = $1`,
@@ -143,10 +171,13 @@ try {
       log(`✔ ${migration.name}`);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});
-      await client.query(
-        `UPDATE ${MIGRATIONS_TABLE} SET "logs" = $2, "rolled_back_at" = now() WHERE "id" = $1`,
-        [id, String(error?.message ?? error)]
-      );
+      // Keep Prisma-compatible failure details without leaving a half-applied SQL transaction.
+      await client
+        .query(
+          `INSERT INTO ${MIGRATIONS_TABLE} ("id","checksum","migration_name","logs","rolled_back_at","started_at","applied_steps_count") VALUES ($1,$2,$3,$4,now(),now(),0)`,
+          [crypto.randomUUID(), migration.checksum, migration.name, String(error?.message ?? error)]
+        )
+        .catch(() => {});
       throw error;
     }
   }

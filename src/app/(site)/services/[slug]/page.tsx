@@ -26,6 +26,7 @@ import { ModalLauncher } from "@/components/ui/modal-launcher";
 import { Badge, Divider, Pagination, SectionHeading, StarRating } from "@/components/ui/primitives";
 import { formatDuration, formatStartingPrice, formatDate } from "@/lib/format";
 import { parsePage } from "@/lib/utils";
+import { serializeJsonLd } from "@/lib/seo";
 
 type PageProps = {
   params: Promise<{ slug: string }>;
@@ -91,7 +92,7 @@ export default async function ServiceDetailPage({ params, searchParams }: PagePr
 
   return (
     <>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }} />
 
       <section className="border-b border-line bg-cream">
         <div className="container-page py-6">

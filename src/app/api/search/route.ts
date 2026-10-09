@@ -10,6 +10,9 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   const query = (request.nextUrl.searchParams.get("q") ?? "").trim();
+  if (query.length > 100) {
+    return NextResponse.json({ ok: false, error: "Search terms must be 100 characters or fewer." }, { status: 400 });
+  }
   if (query.length < 2) return NextResponse.json({ ok: true, results: [] });
 
   try {
@@ -18,6 +21,7 @@ export async function GET(request: NextRequest) {
         where: {
           isActive: true,
           deletedAt: null,
+          category: { type: "SERVICE" },
           OR: [
             { name: { contains: query, mode: "insensitive" } },
             { shortDescription: { contains: query, mode: "insensitive" } },
@@ -25,19 +29,22 @@ export async function GET(request: NextRequest) {
             { category: { name: { contains: query, mode: "insensitive" } } },
           ],
         },
-        select: { id: true, name: true, slug: true, durationMinutes: true, images: { take: 1, select: { url: true } } },
+        orderBy: [{ isFeatured: "desc" }, { sortOrder: "asc" }, { name: "asc" }],
+        select: { id: true, name: true, slug: true, durationMinutes: true, images: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }], take: 1, select: { url: true } } },
         take: 4,
       }),
       prisma.galleryImage.findMany({
         where: {
           isActive: true,
           deletedAt: null,
+          category: { type: "GALLERY" },
           OR: [
             { title: { contains: query, mode: "insensitive" } },
             { tags: { has: query } },
             { category: { name: { contains: query, mode: "insensitive" } } },
           ],
         },
+        orderBy: [{ isFeatured: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
         select: { id: true, title: true, url: true },
         take: 4,
       }),
@@ -45,12 +52,14 @@ export async function GET(request: NextRequest) {
         where: {
           isActive: true,
           deletedAt: null,
+          category: { type: "VIDEO" },
           OR: [
             { title: { contains: query, mode: "insensitive" } },
             { tags: { has: query } },
             { category: { name: { contains: query, mode: "insensitive" } } },
           ],
         },
+        orderBy: [{ isFeatured: "desc" }, { publishedAt: "desc" }, { title: "asc" }],
         select: { id: true, title: true, thumbnailUrl: true },
         take: 4,
       }),

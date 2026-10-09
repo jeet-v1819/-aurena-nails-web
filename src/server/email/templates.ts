@@ -2,6 +2,7 @@
 import { APPOINTMENT_STATUS_LABELS } from "@/lib/constants";
 import { formatDate, formatMinutes } from "@/lib/format";
 import type { AppointmentStatus } from "@prisma/client";
+import { escapeHtml } from "@/lib/html";
 import { emailButton, emailLayout } from "./mailer";
 
 export function passwordResetEmail(name: string, link: string, expiresMinutes: number) {
@@ -9,7 +10,7 @@ export function passwordResetEmail(name: string, link: string, expiresMinutes: n
     subject: "Reset your Aurena Nails password",
     html: emailLayout(
       "Password reset request",
-      `<p>Hi ${name},</p>
+      `<p>Hi ${escapeHtml(name)},</p>
        <p>We received a request to reset the password for your Aurena Nails account.
        This link expires in ${expiresMinutes} minutes and can be used once.</p>
        ${emailButton(link, "Create a new password")}
@@ -66,10 +67,10 @@ export function appointmentStatusEmail(params: {
     subject: `${headline[status]} — ${serviceName}`,
     html: emailLayout(
       headline[status],
-      `<p>Hi ${customerName},</p>
-       <p><strong>${serviceName}</strong><br/>${when}<br/>Booking reference: <strong>${reference}</strong></p>
+      `<p>Hi ${escapeHtml(customerName)},</p>
+       <p><strong>${escapeHtml(serviceName)}</strong><br/>${when}<br/>Booking reference: <strong>${reference}</strong></p>
        <p>Status: <strong>${APPOINTMENT_STATUS_LABELS[status]}</strong></p>
-       ${adminNote ? `<p style="background:#fbf7f4;border-radius:12px;padding:12px 16px;font-size:14px;"><em>${adminNote}</em></p>` : ""}
+       ${adminNote ? `<p style="background:#fbf7f4;border-radius:12px;padding:12px 16px;font-size:14px;"><em>${escapeHtml(adminNote)}</em></p>` : ""}
        ${emailButton(`${appUrl}/appointments`, "View my appointments")}`
     ),
     text: `${headline[status]}
@@ -89,7 +90,7 @@ export function deactivatedAccountEmail(name: string) {
     subject: "Your Aurena Nails account has been deactivated",
     html: emailLayout(
       "Account deactivated",
-      `<p>Hi ${name},</p>
+      `<p>Hi ${escapeHtml(name)},</p>
        <p>Your Aurena Nails account has been deactivated by the studio. You will not be able to sign in while it is inactive.</p>
        <p>Please contact Aurena Nails if you believe this was a mistake.</p>`
     ),

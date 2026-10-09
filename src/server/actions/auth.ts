@@ -6,6 +6,7 @@
  */
 import { redirect } from "next/navigation";
 import { createSession, destroySession } from "@/lib/auth/session";
+import { safeInternalRedirectTarget } from "@/lib/navigation";
 import { actionFailure, actionSuccess, toActionFailure, type ActionResult } from "@/lib/errors";
 import { normalizeInput, validate } from "@/lib/validation";
 import {
@@ -27,7 +28,7 @@ export async function registerAction(
     const result = await registerCustomer(parsed.data);
     if (!result.ok) return actionFailure(result.error, { fieldErrors: result.fieldErrors });
 
-    await createSession(result.user.id, true, result.user.role);
+    await createSession(result.user.id, true, result.user.role, result.user.sessionVersion);
 
     // Keep the table tidy without blocking the response.
     void purgeExpiredResetTokens();
@@ -54,7 +55,7 @@ export async function loginAction(
     }
 
     const remember = parsed.data.remember === "on" || parsed.data.remember === "true" || parsed.data.remember === true;
-    await createSession(result.user.id, remember, result.user.role);
+    await createSession(result.user.id, remember, result.user.role, result.user.sessionVersion);
 
     const redirectTo = result.user.role === "ADMIN" ? "/admin/dashboard" : "/profile";
     return actionSuccess(`Welcome back, ${result.user.firstName}!`, { redirectTo, role: result.user.role });
@@ -78,7 +79,7 @@ export async function adminLoginAction(
       });
     }
 
-    await createSession(result.user.id, true, result.user.role);
+    await createSession(result.user.id, true, result.user.role, result.user.sessionVersion);
     return actionSuccess(`Welcome back, ${result.user.firstName}.`, { redirectTo: "/admin/dashboard" });
   } catch (error) {
     return toActionFailure(error, "We could not sign you in. Please try again.");
@@ -87,7 +88,7 @@ export async function adminLoginAction(
 
 export async function logoutAction(redirectTo = "/") {
   await destroySession();
-  redirect(redirectTo);
+  redirect(safeInternalRedirectTarget(redirectTo));
 }
 
 export async function logoutToLoginAction() {
