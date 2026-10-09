@@ -34,6 +34,12 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   serverExternalPackages,
 
+  // Server actions receive credentials (e.g. the login password), so the dev
+  // server must never echo their arguments into the terminal logs.
+  logging: {
+    serverFunctions: false,
+  },
+
   images: {
     // Cloudinary serves every uploaded asset; local development uploads are
     // served from /public/uploads. Remote avatars (Google/Gravatar style) are

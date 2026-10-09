@@ -18,8 +18,11 @@ import { redirect } from "next/navigation";
 import { SignJWT, jwtVerify } from "jose";
 import type { Role } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+import { getAuthSecret } from "@/lib/env";
+import { SESSION_COOKIE } from "@/lib/auth/cookies";
 
-export const SESSION_COOKIE = "aurena_session";
+// Single source of truth for the cookie name (shared with `src/proxy.ts`).
+export { SESSION_COOKIE };
 const SESSION_DAYS = 30;
 const SESSION_DAYS_SHORT = 1;
 
@@ -35,14 +38,13 @@ export type SessionUser = {
   avatarUrl: string | null;
 };
 
+/**
+ * Validated signing key. `getAuthSecret()` rejects missing values, Neon Auth
+ * URLs, connection strings and other predictable secrets with a clear
+ * configuration error (the value itself is never echoed anywhere).
+ */
 function secretKey(): Uint8Array {
-  const secret = process.env.AUTH_SECRET;
-  if (!secret || secret.length < 16) {
-    throw new Error(
-      "AUTH_SECRET is missing or too short. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\""
-    );
-  }
-  return new TextEncoder().encode(secret);
+  return new TextEncoder().encode(getAuthSecret());
 }
 
 /**
@@ -74,6 +76,10 @@ export async function createSession(userId: string, remember = true, role?: Role
     path: "/",
     maxAge,
   });
+  if (process.env.NODE_ENV === "development") {
+    // Safe: cookie name + lifetime only — the token itself is never logged.
+    console.log(`[AUTH] Session cookie "${SESSION_COOKIE}" set (${Math.round(maxAge / 86400)} day(s))`);
+  }
 }
 
 export async function destroySession() {

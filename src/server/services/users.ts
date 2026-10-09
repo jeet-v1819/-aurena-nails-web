@@ -5,7 +5,7 @@
 import "server-only";
 import { prisma } from "@/lib/db/prisma";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
-import { normaliseEmail } from "@/lib/utils";
+import { normaliseEmail, normaliseMobile } from "@/lib/utils";
 import { createNotification } from "./notifications";
 import { recordAudit } from "./audit";
 import { sendEmail } from "@/server/email/mailer";
@@ -40,12 +40,23 @@ export async function findUserByIdentifier(identifier: string) {
   const trimmed = identifier.trim();
   if (!trimmed) return null;
 
-  const isEmail = trimmed.includes("@");
+  const select = { ...sessionSelect, passwordHash: true, deletedAt: true, role: true };
+
+  // Email: trim + lowercase, exactly as stored at registration.
+  if (trimmed.includes("@")) {
+    return prisma.user.findFirst({
+      where: { email: normaliseEmail(trimmed), deletedAt: null },
+      select,
+    });
+  }
+
+  // Mobile: normalise to the stored E.164 format (+91XXXXXXXXXX) so spaces,
+  // a leading 0/91 or the +91 prefix cannot break the lookup. Falls back to
+  // the whitespace-stripped input for anything that does not parse.
+  const mobile = normaliseMobile(trimmed) ?? trimmed.replace(/[\s()-]/g, "");
   return prisma.user.findFirst({
-    where: isEmail
-      ? { email: normaliseEmail(trimmed), deletedAt: null }
-      : { mobile: trimmed, deletedAt: null },
-    select: { ...sessionSelect, passwordHash: true, deletedAt: true, role: true },
+    where: { mobile, deletedAt: null },
+    select,
   });
 }
 
@@ -125,16 +136,21 @@ export async function authenticate(
   password: string,
   options: { requireAdmin?: boolean } = {}
 ): Promise<AuthResult> {
+  const dev = process.env.NODE_ENV === "development";
+  if (dev) console.log("[AUTH] Login attempt");
+
   const invalid: AuthResult = {
     ok: false,
-    error: "The email/mobile number or password is incorrect.",
+    error: "Invalid email/mobile or password.",
     code: "INVALID_CREDENTIALS",
   };
 
   const user = await findUserByIdentifier(identifier);
+  if (dev) console.log("[AUTH] User lookup completed");
   if (!user || user.deletedAt) return invalid;
 
   const valid = await verifyPassword(password, user.passwordHash);
+  if (dev) console.log("[AUTH] Password verification completed");
   if (!valid) return invalid;
 
   if (!user.isActive) {

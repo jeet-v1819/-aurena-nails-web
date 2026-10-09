@@ -49,17 +49,23 @@ export async function loginAction(
     if (!result.ok) {
       return actionFailure(result.error, {
         code: result.code,
-        fieldErrors: result.code === "INACTIVE_ACCOUNT" ? undefined : { password: ["Incorrect email/mobile or password."] },
+        // Only credential failures get a field error — the inactive-account
+        // and other messages are shown as the headline error instead.
+        fieldErrors: result.code === "INVALID_CREDENTIALS" ? { password: [result.error] } : undefined,
       });
     }
 
     const remember = parsed.data.remember === "on" || parsed.data.remember === "true" || parsed.data.remember === true;
     await createSession(result.user.id, remember, result.user.role);
+    if (process.env.NODE_ENV === "development") {
+      console.log("[AUTH] Session created");
+      console.log("[AUTH] Login successful");
+    }
 
     const redirectTo = result.user.role === "ADMIN" ? "/admin/dashboard" : "/profile";
     return actionSuccess(`Welcome back, ${result.user.firstName}!`, { redirectTo, role: result.user.role });
   } catch (error) {
-    return toActionFailure(error, "We could not sign you in. Please try again.");
+    return toActionFailure(error, "Something went wrong while signing you in. Please try again.");
   }
 }
 
@@ -72,16 +78,27 @@ export async function adminLoginAction(
 
     const result = await authenticate(parsed.data.identifier, parsed.data.password, { requireAdmin: true });
     if (!result.ok) {
-      return actionFailure(result.error, {
+      // Never reveal whether an account exists or what role it has: every
+      // failure on the admin portal reads the same as bad credentials.
+      const message = result.code === "INVALID_CREDENTIALS" || result.code === "ADMIN_ONLY"
+        ? "Invalid email/mobile or password."
+        : result.error;
+      return actionFailure(message, {
         code: result.code,
-        fieldErrors: result.code === "ADMIN_ONLY" ? undefined : { password: ["Incorrect credentials."] },
+        fieldErrors: result.code === "INVALID_CREDENTIALS" || result.code === "ADMIN_ONLY"
+          ? { password: [message] }
+          : undefined,
       });
     }
 
     await createSession(result.user.id, true, result.user.role);
+    if (process.env.NODE_ENV === "development") {
+      console.log("[AUTH] Session created");
+      console.log("[AUTH] Login successful (admin)");
+    }
     return actionSuccess(`Welcome back, ${result.user.firstName}.`, { redirectTo: "/admin/dashboard" });
   } catch (error) {
-    return toActionFailure(error, "We could not sign you in. Please try again.");
+    return toActionFailure(error, "Something went wrong while signing you in. Please try again.");
   }
 }
 

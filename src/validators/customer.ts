@@ -53,7 +53,10 @@ export const loginSchema = z.object({
   /** Email address *or* mobile number. */
   identifier: z.string().trim().min(3, "Enter your email address or mobile number."),
   password: z.string().min(1, "Password is required."),
-  remember: z.union([z.literal("on"), z.literal("true"), z.boolean()]).optional(),
+  /** Checkbox: HTML sends "on"/"absent", React Hook Form sends a boolean. */
+  remember: z
+    .union([z.literal("on"), z.literal("true"), z.literal("false"), z.boolean()])
+    .optional(),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;

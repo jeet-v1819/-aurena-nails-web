@@ -9,8 +9,8 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { jwtVerify } from "jose";
-
-const SESSION_COOKIE = "aurena_session";
+import { SESSION_COOKIE } from "@/lib/auth/cookies";
+import { getAuthSecret } from "@/lib/env";
 
 /** Pages only a signed-in customer (or admin) may open. */
 const CUSTOMER_PREFIXES = ["/profile", "/appointments", "/wishlist", "/notifications"];
@@ -23,9 +23,16 @@ const AUTH_PAGES = ["/login", "/register", "/forgot-password", "/admin/login"];
 type TokenPayload = { sub?: string; role?: "ADMIN" | "CUSTOMER" };
 
 function secretKey(): Uint8Array | null {
-  const secret = process.env.AUTH_SECRET;
-  if (!secret || secret.length < 16) return null;
-  return new TextEncoder().encode(secret);
+  // `getAuthSecret()` validates the secret (rejects Neon Auth URLs, database
+  // connection strings, placeholders, …). Navigation is only a UX guard, so a
+  // configuration problem is treated as "signed out" here — the real failure
+  // surfaces server-side through `requireUser()` / `requireAdmin()` and the
+  // login action, which report a clear configuration error.
+  try {
+    return new TextEncoder().encode(getAuthSecret());
+  } catch {
+    return null;
+  }
 }
 
 async function readSession(request: NextRequest): Promise<TokenPayload | null> {

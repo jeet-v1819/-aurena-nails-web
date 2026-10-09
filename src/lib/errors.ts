@@ -6,6 +6,7 @@
  * errors. Technical details stay in the server log.
  */
 import { Prisma } from "@prisma/client";
+import { EnvConfigError } from "@/lib/env";
 
 export type ActionSuccess<T = undefined> = {
   ok: true;
@@ -86,6 +87,13 @@ export function toActionFailure(error: unknown, fallback = GENERIC_ERROR): Actio
 
   if (error instanceof Prisma.PrismaClientValidationError) {
     return { ok: false, error: "Some of the submitted values were invalid. Please check the form.", code: "VALIDATION" };
+  }
+
+  if (error instanceof EnvConfigError) {
+    // Clear server-side configuration error — the message names the variable
+    // and the fix but never contains a secret value.
+    console.error(`[aurena] configuration error: ${error.message}`);
+    return { ok: false, error: fallback, code: "CONFIG_ERROR" };
   }
 
   console.error("[aurena] unhandled error:", error);

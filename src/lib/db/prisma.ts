@@ -12,14 +12,11 @@
  */
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
+import { getDatabaseUrl } from "@/lib/env";
 
-const connectionString = process.env.DATABASE_URL;
-
-if (!connectionString) {
-  throw new Error(
-    "DATABASE_URL is not set. Copy .env.example to .env and add your Neon connection string."
-  );
-}
+// Fails fast with a clear, value-free configuration error when DATABASE_URL is
+// missing, a placeholder, or not a PostgreSQL URL (e.g. a website/Neon Auth URL).
+const connectionString = getDatabaseUrl();
 
 /** Neon (and every hosted Postgres) terminates TLS; local Postgres does not. */
 const needsSsl = /sslmode=(require|verify-full|verify-ca)/.test(connectionString);
